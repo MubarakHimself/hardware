@@ -1,0 +1,81 @@
+groups:
+  - name: hardware-operational-health
+    rules:
+      - alert: HardwareMetricsMissing
+        expr: absent(hardware_worker_active_heartbeats)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Hardware metrics have disappeared
+          description: The protected metrics endpoint has not produced worker telemetry for five minutes.
+          runbook: docs/OPERATIONS.md#metrics-and-alert-response
+
+      - alert: HardwareWorkerHeartbeatStale
+        expr: hardware_worker_active_heartbeats < 1 or hardware_worker_heartbeat_age_seconds > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: No healthy Hardware worker heartbeat
+          description: No worker has refreshed its database heartbeat within 60 seconds.
+          runbook: docs/OPERATIONS.md#metrics-and-alert-response
+
+      - alert: HardwareIngestionQueueBacklog
+        expr: hardware_ingestion_queue_depth{state="queued",type="all"} > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Hardware ingestion queue is growing
+          description: More than 100 domain ingestion jobs have remained queued for 15 minutes.
+          runbook: docs/OPERATIONS.md#metrics-and-alert-response
+
+      - alert: HardwareIngestionFailures
+        expr: sum(increase(hardware_ingestion_job_failure_attempts_total[15m])) >= 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Repeated Hardware ingestion failures
+          description: At least three ingestion attempts failed within 15 minutes.
+          runbook: docs/OPERATIONS.md#metrics-and-alert-response
+
+      - alert: HardwareProviderQuotaLimited
+        expr: increase(hardware_ingestion_provider_errors_total{category="quota",code="all"}[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: An upstream provider is quota-limiting Hardware
+          description: YouTube or GitHub reported a quota or rate-limit error.
+          runbook: docs/OPERATIONS.md#metrics-and-alert-response
+
+      - alert: HardwareWebsiteFetchFailures
+        expr: increase(hardware_ingestion_provider_errors_total{category="fetch",code="all"}[15m]) >= 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Website metadata fetch errors are elevated
+          description: Ten or more safe-fetch blocks or failures occurred within 15 minutes.
+          runbook: docs/OPERATIONS.md#metrics-and-alert-response
+
+      - alert: HardwareChannelSyncStale
+        expr: hardware_channel_sync_age_seconds > 43200
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A Hardware channel has not synced for 12 hours
+          description: Enabled channel {{ $labels.channel_id }} has a stale or missing successful sync.
+          runbook: docs/OPERATIONS.md#metrics-and-alert-response
+
+      - alert: HardwareSearchLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(hardware_search_request_duration_seconds_bucket[10m]))) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Hardware inventory search latency is high
+          description: Process-local inventory search p95 has exceeded one second for 15 minutes.
+          runbook: docs/OPERATIONS.md#metrics-and-alert-response

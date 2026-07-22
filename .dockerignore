@@ -1,0 +1,17 @@
+.git
+.github
+.next
+.wrangler
+coverage
+dist-db
+dist-worker
+node_modules
+playwright-report
+test-results
+.env
+.env.*
+!.env.example
+npm-debug.log*
+docs
+features
+tests

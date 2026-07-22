@@ -1,0 +1,22 @@
+[
+  { "timestampText": "00:55", "timestampSeconds": 55, "name": "Albato AI", "canonicalUrl": "https://albato.com/automate" },
+  { "timestampText": "01:47", "timestampSeconds": 107, "name": "Codex Micro", "canonicalUrl": "https://openai.com/supply/co-lab/work-louder/" },
+  { "timestampText": "02:38", "timestampSeconds": 158, "name": "River", "canonicalUrl": "https://www.rivergtm.com" },
+  { "timestampText": "03:25", "timestampSeconds": 205, "name": "Nitrosend", "canonicalUrl": "https://nitrosend.com/email-for-agents" },
+  { "timestampText": "04:15", "timestampSeconds": 255, "name": "Framer", "canonicalUrl": "https://www.framer.com" },
+  { "timestampText": "05:03", "timestampSeconds": 303, "name": "In Parallel MCP", "canonicalUrl": "https://www.in-parallel.com/mcp/" },
+  { "timestampText": "05:55", "timestampSeconds": 355, "name": "Graft AI", "canonicalUrl": "https://graft.axcelner.com" },
+  { "timestampText": "06:44", "timestampSeconds": 404, "name": "Verse", "canonicalUrl": "http://useverse.ai" },
+  { "timestampText": "07:31", "timestampSeconds": 451, "name": "Weave", "canonicalUrl": "https://sayweave.com" },
+  { "timestampText": "08:20", "timestampSeconds": 500, "name": "FlightGlitch", "canonicalUrl": "https://flightglitch.com" },
+  { "timestampText": "09:04", "timestampSeconds": 544, "name": "Breadcromb", "canonicalUrl": "https://www.breadcromb.com/product" },
+  { "timestampText": "09:52", "timestampSeconds": 592, "name": "SonOf", "canonicalUrl": "https://www.sonof.io" },
+  { "timestampText": "10:38", "timestampSeconds": 638, "name": "Ventorah", "canonicalUrl": "https://www.ventorah.com" },
+  { "timestampText": "11:32", "timestampSeconds": 692, "name": "Alert Grouping by DrDroid", "canonicalUrl": "https://drdroid.io" },
+  { "timestampText": "12:32", "timestampSeconds": 752, "name": "Kit For AI", "canonicalUrl": "https://kitforai.com" },
+  { "timestampText": "13:24", "timestampSeconds": 804, "name": "Inbix", "canonicalUrl": "https://inbix.xyz" },
+  { "timestampText": "14:04", "timestampSeconds": 844, "name": "V2Fun", "canonicalUrl": "https://v2fun.ai" },
+  { "timestampText": "15:02", "timestampSeconds": 902, "name": "Agently", "canonicalUrl": "https://agently.dev" },
+  { "timestampText": "15:50", "timestampSeconds": 950, "name": "Crustdata Recruiter", "canonicalUrl": "https://crustdata.com/solutions/claude-for-recruiting" },
+  { "timestampText": "16:37", "timestampSeconds": 997, "name": "YAGNI", "canonicalUrl": "https://yagni.app" }
+]

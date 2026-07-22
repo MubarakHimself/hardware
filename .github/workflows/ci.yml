@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      DATABASE_URL: postgresql://hardware:hardware@127.0.0.1:5432/hardware_test
+      DATABASE_SSL: "false"
+      NEXT_PUBLIC_APP_URL: https://hardware.example.test
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+      CLERK_SECRET_KEY: sk_test_ci_only_not_a_real_credential
+      CLERK_WEBHOOK_SIGNING_SECRET: whsec_ci_only_not_a_real_credential
+      ADMIN_CLERK_USER_IDS: user_ci_admin
+      HEALTHCHECK_TOKEN: ci-healthcheck-token-at-least-thirty-two-characters
+      YOUTUBE_API_KEY: ci-youtube-key-not-a-real-credential
+      RELEASE_SHA: ${{ github.sha }}
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_DB: hardware_test
+          POSTGRES_USER: hardware
+          POSTGRES_PASSWORD: hardware
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hardware -d hardware_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:bdd
+      - run: npm run db:check
+      - run: npm run db:migrate
+      - run: npm run db:smoke
+      - run: npm run db:api-smoke
+      - run: npm run db:mutation-smoke
+      - run: npm run build
+      - run: npm run security:audit
+      - run: shellcheck deploy/*.sh
+      - run: >-
+          docker run --rm
+          --entrypoint /bin/promtool
+          -v "$PWD:/mnt:ro"
+          prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+          check rules /mnt/deploy/prometheus-alerts.yml
+      - run: docker compose --env-file .env.example config --quiet
+      - run: >-
+          docker build
+          --build-arg NEXT_PUBLIC_APP_URL=https://hardware.example.test
+          --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+          --tag hardware:ci .
+
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DEMO_MODE: "true"
+      DEMO_USER_ROLE: admin
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

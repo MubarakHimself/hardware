@@ -1,0 +1,9 @@
+# Hardware schedules are expressed in UTC and use stable identifiers.
+# Six-hour channel polling with a small backfill window after maintenance.
+0 */6 * * * schedule_channel_polls ?id=channelPollsV1&fill=7h&max=3
+
+# Daily batches enforce YouTube's rolling revalidation requirement.
+15 2 * * * schedule_youtube_revalidation ?id=youtubeRevalidationV1&fill=25h&max=3
+
+# Repositories are refreshed no more than once per seven days by the scheduler query.
+45 2 * * * schedule_repository_refreshes ?id=repositoryRefreshV1&fill=25h&max=3
