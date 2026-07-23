@@ -2,15 +2,15 @@
   "name": "hardware",
   "version": "0.1.0",
   "private": true,
-  "description": "A private, source-grounded catalog of noteworthy open-source projects.",
+  "description": "A personal, local desktop library for noteworthy open-source projects.",
   "engines": {
     "node": ">=24.0.0",
     "npm": ">=11.0.0"
   },
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -H 127.0.0.1",
     "build": "next build && npm run runtime:build",
-    "start": "next start",
+    "start": "next start -H 127.0.0.1",
     "lint": "eslint . --ignore-pattern .next --ignore-pattern dist-worker --ignore-pattern coverage --ignore-pattern playwright-report --ignore-pattern test-results",
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests/unit",
@@ -31,17 +31,17 @@
     "worker:build": "tsup ./worker/index.ts --format esm --platform node --target node24 --out-dir dist-worker --sourcemap --clean && node ./worker/copy-assets.mjs",
     "worker:start": "node dist-worker/index.js",
     "db:build": "tsup ./db/migrate.ts --format esm --platform node --target node24 --out-dir dist-db --sourcemap --clean",
-    "security:audit": "npm audit --omit=dev --audit-level=high"
+    "security:audit": "npm audit --omit=dev --audit-level=high",
+    "verify:runtime": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\deploy\\verify-local-runtime.ps1"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
-    "@clerk/nextjs": "^6.31.9",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
     "graphile-worker": "^0.16.6",
     "lucide-react": "^0.545.0",
-    "next": "16.2.6",
+    "next": "^16.2.11",
     "pg": "^8.16.3",
     "pino": "^9.9.5",
     "react": "19.2.6",
@@ -52,7 +52,6 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.12.1",
-    "@clerk/testing": "^1.14.8",
     "@cucumber/cucumber": "^12.2.0",
     "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "4.2.1",

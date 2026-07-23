@@ -22,6 +22,12 @@ describe("import request validation", () => {
     ).toMatchObject({ kind: "youtube_video" });
     expect(
       importRequestSchema.parse({
+        kind: "youtube_channel",
+        url: "https://www.youtube.com/@GoogleDevelopers/videos",
+      }),
+    ).toMatchObject({ kind: "youtube_channel" });
+    expect(
+      importRequestSchema.parse({
         kind: "github_repository",
         url: "https://github.com/Egonex-AI/Understand-Anything",
       }),
@@ -43,8 +49,26 @@ describe("import request validation", () => {
     ).toBe(false);
     expect(
       importRequestSchema.safeParse({
+        kind: "youtube_channel",
+        url: "https://www.youtube.com/watch?v=KITOm0HitpY",
+      }).success,
+    ).toBe(false);
+    expect(
+      importRequestSchema.safeParse({
         kind: "website",
         url: "https://www.youtube.com/@example",
+      }).success,
+    ).toBe(false);
+    expect(
+      importRequestSchema.safeParse({
+        kind: "website",
+        url: "https://www.instagram.com/reel/ABC123/",
+      }).success,
+    ).toBe(false);
+    expect(
+      importRequestSchema.safeParse({
+        kind: "website",
+        url: "https://vm.tiktok.com/example/",
       }).success,
     ).toBe(false);
     expect(
@@ -66,6 +90,36 @@ describe("import request validation", () => {
         admin: true,
       }).success,
     ).toBe(false);
+  });
+
+  it("rejects recognized social-video hosts without blocking generic websites", () => {
+    const unsupportedUrls = [
+      "https://www.instagram.com/reel/ABC123/",
+      "https://vm.tiktok.com/example/",
+      "https://www.facebook.com/watch/?v=123",
+      "https://fb.watch/example/",
+      "https://x.com/example/status/123",
+      "https://twitter.com/example/status/123",
+      "https://story.snapchat.com/example",
+      "https://player.vimeo.com/video/123",
+      "https://www.dailymotion.com/video/x123",
+      "https://dai.ly/x123",
+      "https://m.twitch.tv/videos/123",
+    ];
+
+    for (const url of unsupportedUrls) {
+      expect(
+        importRequestSchema.safeParse({ kind: "website", url }).success,
+        url,
+      ).toBe(false);
+    }
+
+    expect(
+      importRequestSchema.safeParse({
+        kind: "website",
+        url: "https://video.example.com/watch/123",
+      }).success,
+    ).toBe(true);
   });
 
   it("extracts exact provider identities", () => {

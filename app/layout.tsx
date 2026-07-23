@@ -1,17 +1,20 @@
 import type { Metadata } from "next";
-import { ClerkProvider } from "@clerk/nextjs";
+import {
+  ThemeProvider,
+  themeBootstrapScript,
+} from "@/components/hardware/theme-provider";
 import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+    process.env.NEXT_PUBLIC_APP_URL ?? "http://127.0.0.1:3000",
   ),
   title: {
-    default: "Hardware — Open project intelligence",
+    default: "Hardware — Personal project intelligence",
     template: "%s · Hardware",
   },
   description:
-    "A source-grounded catalog of open-source projects discovered across timestamped videos.",
+    "A local, source-grounded library of open-source projects discovered across YouTube videos.",
   applicationName: "Hardware",
   robots: {
     index: false,
@@ -20,43 +23,36 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     siteName: "Hardware",
-    title: "Hardware — Open project intelligence",
+    title: "Hardware — Personal project intelligence",
     description:
-      "A source-grounded catalog of open-source projects discovered across timestamped videos.",
+      "A local, source-grounded library of open-source projects discovered across YouTube videos.",
     images: [
       {
-        url: "/og.png",
+        url: "/og-local.jpg",
         width: 1200,
         height: 675,
-        alt: "Hardware project intelligence catalog",
+        alt: "Hardware personal open-source project library",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Hardware — Open project intelligence",
+    title: "Hardware — Personal project intelligence",
     description:
-      "A source-grounded catalog of open-source projects discovered across timestamped videos.",
-    images: ["/og.png"],
+      "A local, source-grounded library of open-source projects discovered across YouTube videos.",
+    images: ["/og-local.jpg"],
   },
 };
 
-function RuntimeClerkProvider({ children }: { children: React.ReactNode }) {
-  if (process.env.DEMO_MODE === "true") return children;
-  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
-    throw new Error(
-      "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is required unless DEMO_MODE=true.",
-    );
-  }
-  return <ClerkProvider>{children}</ClerkProvider>;
-}
-
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" data-scroll-behavior="smooth">
+    <html lang="en" data-scroll-behavior="smooth" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript }} />
+      </head>
       <body>
         <a href="#main-content" className="skip-link">Skip to main content</a>
-        <RuntimeClerkProvider>{children}</RuntimeClerkProvider>
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

@@ -186,7 +186,6 @@ export async function listCollections(): Promise<UiCollection[]> {
 export async function createCollection(input: {
   name: string;
   description?: string;
-  visibility?: "private" | "workspace";
 }): Promise<UiCollection> {
   const result = await request<unknown>("/api/collections", {
     method: "POST",
@@ -197,7 +196,7 @@ export async function createCollection(input: {
 
 export async function updateCollection(
   collection: Pick<UiCollection, "id" | "version">,
-  input: { name?: string; description?: string; visibility?: "private" | "workspace" },
+  input: { name?: string; description?: string },
 ): Promise<UiCollection> {
   const result = await request<unknown>(`/api/collections/${encodeURIComponent(collection.id)}`, {
     method: "PATCH",

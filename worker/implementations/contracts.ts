@@ -1,4 +1,8 @@
-import type { ParsedProjectMention, WebsiteMetadata } from "../../lib/ingestion";
+import type {
+  ParsedProjectMention,
+  ParseDescriptionResult,
+  WebsiteMetadata,
+} from "../../lib/ingestion";
 import type {
   GitHubRepositoryMetadata,
   YouTubeChannel,
@@ -14,10 +18,21 @@ export interface StoredChannel {
   checkpoint: Record<string, unknown>;
 }
 
+export interface ChannelSubscriptionResult {
+  channel: StoredChannel;
+  backfillPending: boolean;
+  subscriptionJobId: string | null;
+}
+
 export interface StoredVideo {
   id: string;
   channelId: string;
   youtubeVideoId: string;
+  youtubeChannelId?: string;
+  title?: string;
+  description?: string;
+  durationSeconds?: number;
+  metadataReady?: boolean;
 }
 
 export interface StoredRepository {
@@ -47,9 +62,25 @@ export interface CandidateInput {
 
 export interface IngestionStore {
   getChannel(id: string): Promise<StoredChannel | undefined>;
-  upsertChannel(channel: YouTubeChannel): Promise<StoredChannel>;
+  upsertChannel(
+    channel: YouTubeChannel,
+    options?: { monitoringEnabled?: boolean },
+  ): Promise<StoredChannel>;
+  ensureChannelSubscription(
+    channel: YouTubeChannel,
+    options: { subscriptionJobId: string; requestedByUserId?: string },
+  ): Promise<ChannelSubscriptionResult>;
+  confirmChannelSubscriptionBackfill(
+    channelId: string,
+    subscriptionJobId: string,
+    resolverJobId: string,
+  ): Promise<boolean>;
   upsertDiscoveredVideo(channelId: string, upload: YouTubeUpload): Promise<StoredVideo>;
-  completeChannelSync(channelId: string, checkpoint: Record<string, unknown>): Promise<void>;
+  completeChannelSync(
+    channelId: string,
+    checkpoint: Record<string, unknown>,
+    jobId: string,
+  ): Promise<void>;
   markChannelError(channelId: string, code: string, summary: string): Promise<void>;
   getVideo(id: string): Promise<StoredVideo | undefined>;
   upsertVideo(channelId: string, video: YouTubeVideo): Promise<StoredVideo>;
@@ -61,6 +92,11 @@ export interface IngestionStore {
     purgeMissingRawSegments: boolean,
     correlationId: string,
   ): Promise<ParsedVideoTargets>;
+  recordSourceReview(
+    videoId: string,
+    jobId: string,
+    parsed: ParseDescriptionResult,
+  ): Promise<void>;
   ensureWebsiteProject(projectId: string | undefined, url: string, title?: string): Promise<string>;
   applyWebsiteMetadata(projectId: string, metadata: WebsiteMetadata): Promise<void>;
   getRepository(id: string): Promise<StoredRepository | undefined>;

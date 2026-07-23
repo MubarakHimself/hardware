@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import { getPool } from "../../db/index";
-import { canManageCollection, canReadCollection, AuthorizationError } from "../auth";
+import { canManageCollection, AuthorizationError } from "../auth";
 import type { AuthenticatedActor } from "../domain";
 import { getServerConfig } from "./config";
 import { createDemoCollection, getDemoState } from "./demo-store";
@@ -11,7 +11,6 @@ export const createCollectionSchema = z
   .object({
     name: z.string().trim().min(1).max(160),
     description: z.string().trim().max(1_000).optional(),
-    visibility: z.enum(["private", "workspace"]).default("private"),
   })
   .strict();
 
@@ -19,91 +18,77 @@ export const updateCollectionSchema = z
   .object({
     name: z.string().trim().min(1).max(160).optional(),
     description: z.string().trim().max(1_000).nullable().optional(),
-    visibility: z.enum(["private", "workspace"]).optional(),
     version: z.number().int().positive(),
   })
   .strict()
   .refine(
     (value) =>
       value.name !== undefined ||
-      value.description !== undefined ||
-      value.visibility !== undefined,
+      value.description !== undefined,
     { message: "At least one editable field is required." },
   );
 
 export interface CollectionDto {
   id: string;
-  ownerId: string;
   name: string;
   description: string | null;
-  visibility: "private" | "workspace";
   version: number;
   updatedAt: string;
   projectIds: string[];
   projectCount: number;
-  canEdit: boolean;
 }
 
-function collectionDto(
-  collection: Record<string, unknown>,
-  actor: AuthenticatedActor,
-): CollectionDto {
+function collectionDto(collection: Record<string, unknown>): CollectionDto {
   const projectIds = Array.isArray(collection.projectIds)
     ? collection.projectIds.map(String)
     : [];
   const updatedAt = collection.updatedAt;
   return {
     id: String(collection.id),
-    ownerId: String(collection.ownerId),
     name: String(collection.name),
     description:
       typeof collection.description === "string" && collection.description
         ? collection.description
         : null,
-    visibility:
-      collection.visibility === "workspace" ? "workspace" : "private",
     version: Number(collection.version),
     updatedAt:
       updatedAt instanceof Date ? updatedAt.toISOString() : String(updatedAt),
     projectIds,
     projectCount: Number(collection.projectCount ?? projectIds.length),
-    canEdit: String(collection.ownerId) === actor.userId,
   };
 }
 
 export async function listCollections(actor: AuthenticatedActor) {
   if (getServerConfig().mode === "demo") {
     return getDemoState().collections
-      .filter((collection) => canReadCollection(actor, collection))
+      .filter((collection) => collection.ownerId === actor.userId)
       .map((collection) => collectionDto({
         id: collection.id,
-        ownerId: collection.ownerId,
         name: collection.name,
         description: collection.description,
-        visibility: collection.visibility,
         version: collection.version,
         updatedAt: collection.updatedAt,
         projectIds: collection.projectIds,
         projectCount: collection.projectIds.length,
-      }, actor));
+      }));
   }
 
   const result = await getPool().query(
     `
-      select c.id, c.name, c.description, c.visibility, c.version,
-        c.owner_user_id as "ownerId", c.updated_at as "updatedAt",
+      select c.id, c.name, c.description, c.version,
+        c.updated_at as "updatedAt",
         count(cp.project_id)::int as "projectCount",
         coalesce(array_agg(cp.project_id::text order by cp.position, cp.created_at)
           filter (where cp.project_id is not null), array[]::text[]) as "projectIds"
       from collections c
       left join collection_projects cp on cp.collection_id = c.id
-      where c.owner_user_id = $1::uuid or c.visibility = 'workspace'
+      where c.owner_user_id = $1::uuid
       group by c.id
-      order by (c.owner_user_id = $1::uuid) desc, c.updated_at desc, c.id
+      order by c.updated_at desc, c.id
     `,
     [actor.userId],
   );
-  return result.rows.map((collection) => collectionDto(collection, actor));
+  return result.rows.map(collectionDto);
 }
 
 export async function createCollection(
@@ -113,7 +98,7 @@ export async function createCollection(
 ) {
   if (getServerConfig().mode === "demo") {
     const collection = createDemoCollection({ ownerId: actor.userId, ...input });
-    return collectionDto(collection, actor);
+    return collectionDto(collection);
   }
 
   const client = await getPool().connect();
@@ -121,10 +106,10 @@ export async function createCollection(
     await client.query("begin");
     const result = await client.query(
       `insert into collections (owner_user_id, name, description, visibility)
-       values ($1::uuid, $2, $3, $4)
-       returning id, owner_user_id as "ownerId", name, description, visibility,
+       values ($1::uuid, $2, $3, 'private')
+       returning id, name, description,
                  version, created_at as "createdAt", updated_at as "updatedAt"`,
-      [actor.userId, input.name, input.description ?? null, input.visibility],
+      [actor.userId, input.name, input.description ?? null],
     );
     const collection = result.rows[0];
     await client.query(
@@ -135,14 +120,11 @@ export async function createCollection(
         actor.userId,
         collection.id,
         correlationId,
-        JSON.stringify({ visibility: input.visibility, name: input.name }),
+        JSON.stringify({ name: input.name }),
       ],
     );
     await client.query("commit");
-    return collectionDto(
-      { ...collection, projectIds: [], projectCount: 0 },
-      actor,
-    );
+    return collectionDto({ ...collection, projectIds: [], projectCount: 0 });
   } catch (error) {
     await client.query("rollback").catch(() => undefined);
     throw error;
@@ -207,7 +189,7 @@ export async function mutateCollectionMembership(options: {
   try {
     await client.query("begin");
     const collectionResult = await client.query(
-      `select owner_user_id as "ownerId", visibility
+      `select owner_user_id as "ownerId"
          from collections where id = $1::uuid for update`,
       [options.collectionId],
     );
@@ -303,12 +285,9 @@ export async function updateCollection(options: {
     if (options.input.description !== undefined) {
       collection.description = options.input.description ?? "";
     }
-    if (options.input.visibility !== undefined) {
-      collection.visibility = options.input.visibility;
-    }
     collection.version += 1;
     collection.updatedAt = new Date().toISOString();
-    return collectionDto(collection, options.actor);
+    return collectionDto(collection);
   }
 
   z.string().uuid().parse(options.collectionId);
@@ -316,7 +295,7 @@ export async function updateCollection(options: {
   try {
     await client.query("begin");
     const current = await client.query(
-      `select owner_user_id as "ownerId", visibility, version
+      `select owner_user_id as "ownerId", version
          from collections where id = $1::uuid for update`,
       [options.collectionId],
     );
@@ -345,17 +324,12 @@ export async function updateCollection(options: {
       sets.push(`description = ${parameter(options.input.description)}`);
       changedFields.push("description");
     }
-    if (options.input.visibility !== undefined) {
-      sets.push(`visibility = ${parameter(options.input.visibility)}`);
-      changedFields.push("visibility");
-    }
     values.push(options.collectionId);
     const idParameter = `$${values.length}`;
     const result = await client.query(
       `update collections set ${sets.join(", ")}, version = version + 1, updated_at = now()
         where id = ${idParameter}::uuid
-        returning id, owner_user_id as "ownerId", name, description,
-                  visibility, version, updated_at as "updatedAt"`,
+        returning id, name, description, version, updated_at as "updatedAt"`,
       values,
     );
     const membership = await client.query(
@@ -373,13 +347,10 @@ export async function updateCollection(options: {
       [options.actor.userId, options.collectionId, options.correlationId, JSON.stringify({ version: options.input.version + 1, changedFields })],
     );
     await client.query("commit");
-    return collectionDto(
-      {
-        ...result.rows[0],
-        projectIds: membership.rows[0]?.projectIds ?? [],
-      },
-      options.actor,
-    );
+    return collectionDto({
+      ...result.rows[0],
+      projectIds: membership.rows[0]?.projectIds ?? [],
+    });
   } catch (error) {
     await client.query("rollback").catch(() => undefined);
     throw error;
@@ -415,7 +386,7 @@ export async function deleteCollection(options: {
   try {
     await client.query("begin");
     const current = await client.query(
-      `select owner_user_id as "ownerId", visibility, version
+      `select owner_user_id as "ownerId", version
          from collections where id = $1::uuid for update`,
       [options.collectionId],
     );

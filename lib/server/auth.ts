@@ -1,75 +1,53 @@
 import "server-only";
-import { auth, currentUser } from "@clerk/nextjs/server";
 import { getPool } from "../../db/index";
-import { AuthorizationError, requireCapability } from "../auth";
+import { requireCapability } from "../auth";
 import type { AuthenticatedActor, Capability } from "../domain";
 import { getServerConfig } from "./config";
-import { DEMO_ACTOR_ID } from "./demo-identity";
+import { DEFAULT_LOCAL_OWNER_ID, DEMO_ACTOR_ID } from "./local-identity";
 
-export { DEMO_ACTOR_ID } from "./demo-identity";
+export { DEFAULT_LOCAL_OWNER_ID, DEMO_ACTOR_ID } from "./local-identity";
 
 type UserRow = {
   id: string;
   role: "member" | "admin";
-  deleted_at: Date | null;
 };
 
-function limited(value: string | null | undefined, maximum: number) {
-  const normalized = value?.trim();
-  return normalized ? normalized.slice(0, maximum) : null;
-}
-
-async function upsertClerkUser(clerkUserId: string): Promise<AuthenticatedActor> {
-  const config = getServerConfig();
-  if (config.mode !== "production") {
-    throw new AuthorizationError("authentication_required");
+/**
+ * Creates the one durable owner before it is referenced by ownership or audit
+ * foreign keys. The fixed primary key and conflict update make concurrent
+ * first requests safe and repair a stale role/tombstone from an older install.
+ */
+export async function ensureLocalOwner(
+  userId: string,
+  displayName: string,
+): Promise<AuthenticatedActor> {
+  if (userId !== DEFAULT_LOCAL_OWNER_ID) {
+    throw new Error("Personal Local must use the stable local owner ID.");
   }
-  const clerkUser = await currentUser();
-  if (!clerkUser || clerkUser.id !== clerkUserId) {
-    throw new AuthorizationError("authentication_required");
-  }
-
-  const primaryEmail = clerkUser.emailAddresses.find(
-    (email) => email.id === clerkUser.primaryEmailAddressId,
-  )?.emailAddress;
-  const combinedName = [clerkUser.firstName, clerkUser.lastName]
-    .filter(Boolean)
-    .join(" ");
-
   const result = await getPool().query<UserRow>(
     `
       insert into users (
-        clerk_user_id,
-        email,
+        id,
         display_name,
-        avatar_url,
+        role,
         last_seen_at,
-        role
-      ) values ($1, $2, $3, $4, now(), $5)
-      on conflict (clerk_user_id) do update
-      set email = excluded.email,
-          display_name = excluded.display_name,
-          avatar_url = excluded.avatar_url,
-          role = excluded.role,
+        deleted_at
+      ) values ($1::uuid, $2, 'admin', now(), null)
+      on conflict (id) do update
+      set display_name = excluded.display_name,
+          role = 'admin',
           last_seen_at = now(),
+          deleted_at = null,
           updated_at = now()
-      where users.deleted_at is null
-      returning id, role, deleted_at
+      returning id::text, role
     `,
-    [
-      clerkUserId,
-      limited(primaryEmail?.toLowerCase(), 320),
-      limited(combinedName || clerkUser.username, 160),
-      limited(clerkUser.imageUrl, 2_048),
-      config.adminClerkUserIds.includes(clerkUserId) ? "admin" : "member",
-    ],
+    [userId, displayName],
   );
-  const user = result.rows[0];
-  if (!user || user.deleted_at) {
-    throw new AuthorizationError("forbidden");
+  const owner = result.rows[0];
+  if (!owner || owner.role !== "admin") {
+    throw new Error("The local owner could not be initialized.");
   }
-
-  return { userId: user.id, clerkUserId, role: user.role };
+  return { userId: owner.id, role: "admin" };
 }
 
 export async function getRequestActor(): Promise<AuthenticatedActor> {
@@ -77,16 +55,10 @@ export async function getRequestActor(): Promise<AuthenticatedActor> {
   if (config.mode === "demo") {
     return {
       userId: DEMO_ACTOR_ID,
-      clerkUserId: "demo_user",
       role: config.demoRole,
     };
   }
-
-  const session = await auth();
-  if (!session.userId) {
-    throw new AuthorizationError("authentication_required");
-  }
-  return upsertClerkUser(session.userId);
+  return ensureLocalOwner(config.localOwnerId, config.localOwnerName);
 }
 
 export async function requireRequestCapability(

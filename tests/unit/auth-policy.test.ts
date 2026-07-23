@@ -86,13 +86,14 @@ describe("collection policy", () => {
     expect(canReadCollection(admin, collection)).toBe(false);
   });
 
-  it("lets authenticated users read workspace collections", () => {
+  it("does not revive sharing from a legacy workspace visibility value", () => {
     const collection = {
       ownerId: member.userId,
       visibility: "workspace" as const,
     };
-    expect(canReadCollection(otherMember, collection)).toBe(true);
-    expect(canReadCollection(admin, collection)).toBe(true);
+    expect(canReadCollection(member, collection)).toBe(true);
+    expect(canReadCollection(otherMember, collection)).toBe(false);
+    expect(canReadCollection(admin, collection)).toBe(false);
     expect(canReadCollection(null, collection)).toBe(false);
   });
 

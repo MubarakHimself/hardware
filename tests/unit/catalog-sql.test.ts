@@ -66,6 +66,10 @@ describe("catalog search SQL", () => {
     expect(searchSql).toContain(
       "to_tsvector( 'simple', coalesce(r.owner, '') || ' ' || coalesce(r.name, '') || ' ' || coalesce(r.description, '') || ' ' || coalesce(r.primary_language, '') || ' ' || coalesce(r.license_spdx, '') || ' ' || coalesce(r.topics::text, '') ) @@ plainto_tsquery('simple', $2)",
     );
+    expect(searchSql).toContain(
+      "search_collection.owner_user_id = $1::uuid",
+    );
+    expect(searchSql).not.toContain("visibility = 'workspace'");
 
     const facetQuery = databaseMock.queries.find(({ text }) =>
       text.includes("from channel_sources c"),
@@ -85,11 +89,33 @@ describe("catalog search SQL", () => {
         text.includes("r.license_spdx as id"),
       ),
     ).toBe(true);
-    expect(
-      databaseMock.queries.some(({ text }) =>
-        text.includes("from collections c"),
-      ),
-    ).toBe(true);
+    const collectionFacet = databaseMock.queries.find(({ text }) =>
+      text.includes("from collections c"),
+    );
+    expect(collectionFacet).toBeDefined();
+    expect(compact(collectionFacet!.text)).toContain(
+      "where c.owner_user_id = $1::uuid",
+    );
+    expect(collectionFacet!.text).not.toContain("visibility = 'workspace'");
+  });
+
+  it("filters by collections owned by the local actor only", async () => {
+    await listProjects(
+      {
+        userId: "00000000-0000-4000-8000-000000000010",
+        role: "member",
+      },
+      {
+        collection: "00000000-0000-4000-8000-000000000020",
+        sort: "recently_seen",
+        view: "cards",
+        limit: 24,
+      },
+    );
+
+    const projectSql = compact(databaseMock.queries[0].text);
+    expect(projectSql).toContain("cf.owner_user_id = $1::uuid");
+    expect(projectSql).not.toContain("cf.visibility");
   });
 
   it("resolves merged IDs to the canonical project and aggregates predecessor history", async () => {

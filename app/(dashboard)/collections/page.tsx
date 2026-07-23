@@ -8,9 +8,9 @@ export default function CollectionsPage() {
   return (
     <>
       <PageHeading
-        eyebrow="Your workspace"
+        eyebrow="Personal library"
         title="Collections"
-        description="Keep projects in several purpose-built boards. Collections begin private and can be shared read-only when you choose."
+        description="Keep projects in several purpose-built boards for comparisons, build ideas, and research threads you want to revisit."
       />
       <CollectionsClient />
     </>

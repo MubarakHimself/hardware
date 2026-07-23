@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import type { ParsedLink, ParsedProjectMention, WebsiteMetadata } from "../../lib/ingestion";
+import type {
+  ParsedLink,
+  ParsedProjectMention,
+  ParseDescriptionResult,
+  WebsiteMetadata,
+} from "../../lib/ingestion";
 import type { GitHubRepositoryMetadata, YouTubeChannel, YouTubeUpload, YouTubeVideo } from "../../lib/integrations";
 import type {
   CandidateInput,
+  ChannelSubscriptionResult,
   IngestionStore,
   ParsedVideoTargets,
   StoredChannel,
@@ -69,19 +75,195 @@ export class PgIngestionStore implements IngestionStore {
     return row ? { id: row.id, youtubeChannelId: row.youtube_channel_id, uploadsPlaylistId: row.uploads_playlist_id, checkpoint: row.checkpoint ?? {} } : undefined;
   }
 
-  async upsertChannel(channel: YouTubeChannel): Promise<StoredChannel> {
+  async upsertChannel(
+    channel: YouTubeChannel,
+    options: { monitoringEnabled?: boolean } = {},
+  ): Promise<StoredChannel> {
+    const monitoringEnabled = options.monitoringEnabled ?? false;
     const result = await this.pool.query<{ id: string; youtube_channel_id: string; uploads_playlist_id: string; checkpoint: Record<string, unknown> }>(
       `insert into channel_sources (youtube_channel_id, uploads_playlist_id, handle, title, canonical_url, thumbnail_url, state, enabled)
-       values ($1, $2, $3, $4, $5, $6, 'active', true)
+       values ($1, $2, $3, $4, $5, $6, 'active', $7)
        on conflict (youtube_channel_id) do update set uploads_playlist_id = excluded.uploads_playlist_id, handle = excluded.handle,
          title = excluded.title, canonical_url = excluded.canonical_url, thumbnail_url = excluded.thumbnail_url,
-         state = 'active', last_error_code = null, last_error_summary = null, updated_at = now()
+         enabled = channel_sources.enabled or excluded.enabled,
+         state = case when excluded.enabled then 'active'::source_state else channel_sources.state end,
+         last_error_code = case when excluded.enabled then null else channel_sources.last_error_code end,
+         last_error_summary = case when excluded.enabled then null else channel_sources.last_error_summary end,
+         updated_at = now()
        returning id, youtube_channel_id, uploads_playlist_id, checkpoint`,
-      [channel.id, channel.uploadsPlaylistId, channel.handle ?? null, channel.title.slice(0, 300), channel.canonicalUrl, channel.thumbnailUrl ?? null],
+      [channel.id, channel.uploadsPlaylistId, channel.handle ?? null, channel.title.slice(0, 300), channel.canonicalUrl, channel.thumbnailUrl ?? null, monitoringEnabled],
     );
     const row = result.rows[0];
     if (!row) throw new Error("Channel upsert returned no row.");
     return { id: row.id, youtubeChannelId: row.youtube_channel_id, uploadsPlaylistId: row.uploads_playlist_id, checkpoint: row.checkpoint ?? {} };
+  }
+
+  async ensureChannelSubscription(
+    channel: YouTubeChannel,
+    options: { subscriptionJobId: string; requestedByUserId?: string },
+  ): Promise<ChannelSubscriptionResult> {
+    return this.transaction(async (client) => {
+      await client.query(
+        "select pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+        [`hardware:youtube-channel:${channel.id}`],
+      );
+      const existing = await client.query<{
+        id: string;
+        enabled: boolean;
+      }>(
+        `select id, enabled from channel_sources
+          where youtube_channel_id = $1 for update`,
+        [channel.id],
+      );
+      const marker = JSON.stringify({
+        initialBackfillPending: true,
+        subscriptionJobId: options.subscriptionJobId,
+      });
+      const row = !existing.rows[0]
+        ? (
+            await client.query<{
+              id: string;
+              youtube_channel_id: string;
+              uploads_playlist_id: string;
+              checkpoint: Record<string, unknown>;
+            }>(
+              `insert into channel_sources
+                (youtube_channel_id, uploads_playlist_id, handle, title,
+                 canonical_url, thumbnail_url, created_by_user_id, enabled,
+                 state, sync_frequency, initial_history_mode, checkpoint,
+                 next_sync_at)
+               values ($1, $2, $3, $4, $5, $6,
+                       (select id from users where id = $7::uuid), true,
+                       'active', 'daily', 'latest_25', $8::jsonb, null)
+               returning id, youtube_channel_id, uploads_playlist_id, checkpoint`,
+              [
+                channel.id,
+                channel.uploadsPlaylistId,
+                channel.handle ?? null,
+                channel.title.slice(0, 300),
+                channel.canonicalUrl,
+                channel.thumbnailUrl ?? null,
+                options.requestedByUserId ?? null,
+                marker,
+              ],
+            )
+          ).rows[0]
+        : existing.rows[0].enabled
+          ? (
+              await client.query<{
+                id: string;
+                youtube_channel_id: string;
+                uploads_playlist_id: string;
+                checkpoint: Record<string, unknown>;
+              }>(
+                `update channel_sources
+                    set uploads_playlist_id = $2, handle = $3, title = $4,
+                        canonical_url = $5, thumbnail_url = $6,
+                        updated_at = now()
+                  where youtube_channel_id = $1
+                  returning id, youtube_channel_id, uploads_playlist_id,
+                            checkpoint`,
+                [
+                  channel.id,
+                  channel.uploadsPlaylistId,
+                  channel.handle ?? null,
+                  channel.title.slice(0, 300),
+                  channel.canonicalUrl,
+                  channel.thumbnailUrl ?? null,
+                ],
+              )
+            ).rows[0]
+          : (
+              await client.query<{
+                id: string;
+                youtube_channel_id: string;
+                uploads_playlist_id: string;
+                checkpoint: Record<string, unknown>;
+              }>(
+                `update channel_sources
+                    set uploads_playlist_id = $2, handle = $3, title = $4,
+                        canonical_url = $5, thumbnail_url = $6, enabled = true,
+                        state = 'active', sync_frequency = 'daily',
+                        initial_history_mode = 'latest_25',
+                        initial_history_since = null, next_sync_at = null,
+                        checkpoint = checkpoint || $7::jsonb,
+                        created_by_user_id = coalesce(
+                          created_by_user_id,
+                          (select id from users where id = $8::uuid)
+                        ),
+                        last_error_code = null, last_error_summary = null,
+                        updated_at = now()
+                  where youtube_channel_id = $1
+                  returning id, youtube_channel_id, uploads_playlist_id,
+                            checkpoint`,
+                [
+                  channel.id,
+                  channel.uploadsPlaylistId,
+                  channel.handle ?? null,
+                  channel.title.slice(0, 300),
+                  channel.canonicalUrl,
+                  channel.thumbnailUrl ?? null,
+                  marker,
+                  options.requestedByUserId ?? null,
+                ],
+              )
+            ).rows[0];
+      if (!row) throw new Error("Channel subscription upsert returned no row.");
+      const checkpoint = row.checkpoint ?? {};
+      const subscriptionJobId =
+        checkpoint.initialBackfillPending === true &&
+        typeof checkpoint.subscriptionJobId === "string"
+          ? checkpoint.subscriptionJobId
+          : null;
+      return {
+        channel: {
+          id: row.id,
+          youtubeChannelId: row.youtube_channel_id,
+          uploadsPlaylistId: row.uploads_playlist_id,
+          checkpoint,
+        },
+        backfillPending: subscriptionJobId !== null,
+        subscriptionJobId,
+      };
+    });
+  }
+
+  async confirmChannelSubscriptionBackfill(
+    channelId: string,
+    subscriptionJobId: string,
+    resolverJobId: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      `with child as (
+         select id
+           from ingestion_jobs
+          where type = 'channel_backfill'
+            and checkpoint ->> 'subscriptionJobId' = $2
+          order by created_at
+          limit 1
+       ), relinked_batch_item as (
+         update import_batch_items as item
+            set ingestion_job_id = child.id, updated_at = now()
+           from child
+          where item.ingestion_job_id in ($2::uuid, $3::uuid)
+          returning item.id
+       ), updated_channel as (
+         update channel_sources as c
+            set checkpoint = c.checkpoint
+                  - 'initialBackfillPending' - 'subscriptionJobId',
+                updated_at = now()
+          where c.id = $1::uuid
+            and c.checkpoint ->> 'subscriptionJobId' = $2
+            and exists (select 1 from child)
+          returning c.id
+       )
+       select child.id,
+              (select count(*) from relinked_batch_item) as relinked_item_count,
+              (select count(*) from updated_channel) as cleared_channel_count
+         from child`,
+      [channelId, subscriptionJobId, resolverJobId],
+    );
+    return (result.rowCount ?? result.rows.length) > 0;
   }
 
   async upsertDiscoveredVideo(channelId: string, upload: YouTubeUpload): Promise<StoredVideo> {
@@ -98,44 +280,110 @@ export class PgIngestionStore implements IngestionStore {
     return { id: row.id, channelId: row.channel_id, youtubeVideoId: row.youtube_video_id };
   }
 
-  async completeChannelSync(channelId: string, checkpoint: Record<string, unknown>): Promise<void> {
+  async completeChannelSync(
+    channelId: string,
+    checkpoint: Record<string, unknown>,
+    jobId: string,
+  ): Promise<void> {
+    const durableCheckpoint = { ...checkpoint };
+    delete durableCheckpoint.initialBackfillPending;
+    delete durableCheckpoint.subscriptionJobId;
     await this.pool.query(
-      "update channel_sources set checkpoint = $2::jsonb, state = 'active', last_synced_at = now(), next_sync_at = now() + interval '6 hours', last_error_code = null, last_error_summary = null, updated_at = now() where id = $1",
-      [channelId, JSON.stringify(checkpoint)],
+      `with updated_channel as (
+         update channel_sources
+            set checkpoint = $2::jsonb, updated_at = now()
+          where id = $1::uuid
+          returning id
+       )
+       update ingestion_jobs j
+          set checkpoint = j.checkpoint || jsonb_build_object(
+                'enumerationComplete', true,
+                'channelCheckpointCommittedAt', now()
+              ),
+              updated_at = now()
+         from updated_channel
+        where j.id = $3::uuid
+          and j.scope_type = 'channel'
+          and j.scope_id = updated_channel.id::text`,
+      [channelId, JSON.stringify(durableCheckpoint), jobId],
     );
   }
 
   async markChannelError(channelId: string, code: string, summary: string): Promise<void> {
     await this.pool.query(
-      "update channel_sources set state='error', last_error_code=$2, last_error_summary=$3, next_sync_at=now() + interval '6 hours', updated_at=now() where id=$1",
+      `update channel_sources
+          set state = case when state = 'paused' then 'paused'::source_state else 'error'::source_state end,
+              last_error_code = $2, last_error_summary = $3,
+              next_sync_at = case
+                when state = 'paused' or sync_frequency = 'manual' then null
+                when sync_frequency = 'weekly' then now() + interval '7 days'
+                else now() + interval '1 day'
+              end,
+              updated_at = now()
+        where id = $1`,
       [channelId, code.slice(0, 80), summary.slice(0, 500)],
     );
   }
 
   async getVideo(id: string): Promise<StoredVideo | undefined> {
-    const result = await this.pool.query<{ id: string; channel_id: string; youtube_video_id: string }>(
-      "select id, channel_id, youtube_video_id from video_sources where id = $1",
+    const result = await this.pool.query<{
+      id: string;
+      channel_id: string;
+      youtube_video_id: string;
+      youtube_channel_id: string;
+      title: string | null;
+      description: string | null;
+      duration_seconds: number | null;
+      metadata_ready: boolean;
+    }>(
+      `select v.id, v.channel_id, v.youtube_video_id,
+              c.youtube_channel_id, v.title, v.description,
+              v.duration_seconds,
+              v.description_fetched_at is not null as metadata_ready
+         from video_sources v
+         join channel_sources c on c.id = v.channel_id
+        where v.id = $1`,
       [id],
     );
     const row = result.rows[0];
-    return row ? { id: row.id, channelId: row.channel_id, youtubeVideoId: row.youtube_video_id } : undefined;
+    return row ? {
+      id: row.id,
+      channelId: row.channel_id,
+      youtubeVideoId: row.youtube_video_id,
+      youtubeChannelId: row.youtube_channel_id,
+      title: row.title ?? undefined,
+      description: row.description ?? undefined,
+      durationSeconds: row.duration_seconds ?? undefined,
+      metadataReady: row.metadata_ready,
+    } : undefined;
   }
 
   async upsertVideo(channelId: string, video: YouTubeVideo): Promise<StoredVideo> {
     const result = await this.pool.query<{ id: string; channel_id: string; youtube_video_id: string }>(
       `insert into video_sources (channel_id, youtube_video_id, title, description, etag, published_at, duration_seconds,
-          availability, description_fetched_at, youtube_data_expires_at, last_verified_at)
-       values ($1, $2, $3, $4, $5, $6, $7, 'available', now(), now() + interval '30 days', now())
+          availability, description_fetched_at, youtube_data_expires_at,
+          unavailable_recheck_at, last_verified_at)
+       values ($1, $2, $3, $4, $5, $6, $7, 'available', now(), now() + interval '30 days', null, now())
        on conflict (youtube_video_id) do update set channel_id = excluded.channel_id, title = excluded.title,
          description = excluded.description, etag = excluded.etag, published_at = excluded.published_at,
          duration_seconds = excluded.duration_seconds, availability = 'available', description_fetched_at = now(),
-         youtube_data_expires_at = now() + interval '30 days', last_verified_at = now(), updated_at = now()
+         youtube_data_expires_at = now() + interval '30 days', unavailable_recheck_at = null,
+         last_verified_at = now(), updated_at = now()
        returning id, channel_id, youtube_video_id`,
       [channelId, video.id, video.title.slice(0, 500), video.description, video.etag?.slice(0, 160) ?? null, video.publishedAt ? new Date(video.publishedAt) : null, video.durationSeconds ?? null],
     );
     const row = result.rows[0];
     if (!row) throw new Error("Video upsert returned no row.");
-    return { id: row.id, channelId: row.channel_id, youtubeVideoId: row.youtube_video_id };
+    return {
+      id: row.id,
+      channelId: row.channel_id,
+      youtubeVideoId: row.youtube_video_id,
+      youtubeChannelId: video.channelId,
+      title: video.title,
+      description: video.description,
+      durationSeconds: video.durationSeconds,
+      metadataReady: true,
+    };
   }
 
   async markVideoUnavailable(videoId: string, correlationId: string): Promise<void> {
@@ -144,7 +392,16 @@ export class PgIngestionStore implements IngestionStore {
         `select v.availability,
                 (v.title is not null or v.description is not null or v.etag is not null
                  or v.published_at is not null or v.duration_seconds is not null
-                 or exists (select 1 from sightings s where s.video_id = v.id and s.raw_segment is not null))
+                 or exists (select 1 from sightings s where s.video_id = v.id and s.raw_segment is not null)
+                 or exists (
+                   select 1 from source_reviews review
+                    where review.video_id = v.id
+                      and (
+                        jsonb_array_length(review.rejected_rows) > 0
+                        or jsonb_array_length(review.ignored_links) > 0
+                        or jsonb_array_length(review.diagnostics) > 0
+                      )
+                 ))
                   as had_restricted_data
            from video_sources v where v.id = $1 for update`,
         [videoId],
@@ -153,10 +410,21 @@ export class PgIngestionStore implements IngestionStore {
       await client.query(
         `update video_sources set title = null, description = null, etag = null, published_at = null,
            duration_seconds = null, availability = 'unavailable', description_fetched_at = null,
-           youtube_data_expires_at = null, last_verified_at = now(), updated_at = now() where id = $1`,
+           youtube_data_expires_at = null, unavailable_recheck_at = now() + interval '30 days',
+           last_verified_at = now(), updated_at = now() where id = $1`,
         [videoId],
       );
       await client.query("update sightings set raw_segment = null, last_verified_at = now(), updated_at = now() where video_id = $1", [videoId]);
+      await client.query(
+        `update source_reviews
+            set rejected_rows = '[]'::jsonb,
+                ignored_links = '[]'::jsonb,
+                diagnostics = '[]'::jsonb,
+                version = version + 1,
+                updated_at = now()
+          where video_id = $1::uuid`,
+        [videoId],
+      );
       if (
         current.rows[0].availability !== "unavailable" ||
         current.rows[0].had_restricted_data
@@ -324,6 +592,107 @@ export class PgIngestionStore implements IngestionStore {
       }
       return { repositoryTargets: [...repositoryTargets.values()], websiteTargets: [...websiteTargets.values()] };
     });
+  }
+
+  async recordSourceReview(
+    videoId: string,
+    jobId: string,
+    parsed: ParseDescriptionResult,
+  ): Promise<void> {
+    const warningCount = parsed.diagnostics.filter(
+      (diagnostic) => diagnostic.severity === "warning",
+    ).length;
+    const errorCount = parsed.diagnostics.filter(
+      (diagnostic) => diagnostic.severity === "error",
+    ).length;
+    const issueFingerprint = createHash("sha256")
+      .update(JSON.stringify({
+        mentions: parsed.mentions.length,
+        rejectedRows: parsed.rejectedRows,
+        ignoredLinks: parsed.ignoredLinks,
+        diagnostics: parsed.diagnostics,
+      }))
+      .digest("hex");
+    const hasReviewableIssue =
+      parsed.mentions.length === 0 ||
+      warningCount > 0 ||
+      errorCount > 0 ||
+      parsed.rejectedRows.length > 0 ||
+      parsed.ignoredLinks.length > 0;
+
+    if (!hasReviewableIssue) {
+      await this.pool.query(
+        `update source_reviews
+            set state = 'resolved', ingestion_job_id = $2::uuid,
+                parser_version = $3, issue_fingerprint = $4,
+                version = version + 1,
+                mention_count = $5, warning_count = 0, error_count = 0,
+                rejected_rows = '[]'::jsonb, ignored_links = '[]'::jsonb,
+                diagnostics = '[]'::jsonb, resolved_at = now(),
+                resolved_by_user_id = null, resolution_note = null,
+                updated_at = now()
+          where video_id = $1::uuid`,
+        [videoId, jobId, parsed.parserVersion, issueFingerprint, parsed.mentions.length],
+      );
+      return;
+    }
+
+    await this.pool.query(
+      `insert into source_reviews
+        (video_id, ingestion_job_id, state, parser_version, issue_fingerprint,
+         mention_count, warning_count, error_count, rejected_rows,
+         ignored_links, diagnostics)
+       values ($1::uuid, $2::uuid, 'open', $3, $4, $5, $6, $7,
+               $8::jsonb, $9::jsonb, $10::jsonb)
+       on conflict (video_id) do update
+         set ingestion_job_id = excluded.ingestion_job_id,
+             state = case
+               when source_reviews.issue_fingerprint = excluded.issue_fingerprint
+                 and source_reviews.state = 'ignored'
+               then 'ignored'::source_review_state
+               else 'open'::source_review_state
+             end,
+             parser_version = excluded.parser_version,
+             issue_fingerprint = excluded.issue_fingerprint,
+             version = source_reviews.version + 1,
+             mention_count = excluded.mention_count,
+             warning_count = excluded.warning_count,
+             error_count = excluded.error_count,
+             rejected_rows = excluded.rejected_rows,
+             ignored_links = excluded.ignored_links,
+             diagnostics = excluded.diagnostics,
+             resolved_at = case
+               when source_reviews.issue_fingerprint = excluded.issue_fingerprint
+                 and source_reviews.state = 'ignored'
+               then source_reviews.resolved_at
+               else null
+             end,
+             resolved_by_user_id = case
+               when source_reviews.issue_fingerprint = excluded.issue_fingerprint
+                 and source_reviews.state = 'ignored'
+               then source_reviews.resolved_by_user_id
+               else null
+             end,
+             resolution_note = case
+               when source_reviews.issue_fingerprint = excluded.issue_fingerprint
+                 and source_reviews.state = 'ignored'
+               then source_reviews.resolution_note
+               else null
+             end,
+             updated_at = now()`,
+      [
+        videoId,
+        jobId,
+        parsed.parserVersion,
+        issueFingerprint,
+        parsed.mentions.length,
+        warningCount,
+        errorCount,
+        JSON.stringify(parsed.rejectedRows),
+        JSON.stringify(parsed.ignoredLinks),
+        JSON.stringify(parsed.diagnostics),
+      ],
+    );
   }
 
   async ensureWebsiteProject(projectId: string | undefined, url: string, title?: string): Promise<string> {

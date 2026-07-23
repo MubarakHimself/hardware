@@ -1,25 +1,86 @@
 import type { Metadata } from "next";
-import { BotOff, Database, GitBranch, RadioTower, Search, ShieldCheck } from "lucide-react";
+import {
+  BotOff,
+  CalendarClock,
+  Database,
+  GitBranch,
+  HardDrive,
+  RadioTower,
+  Search,
+  ShieldCheck,
+  VideoOff,
+} from "lucide-react";
 import { PageHeading } from "@/components/hardware/page-heading";
 import { Card } from "@/components/ui/card";
 
-export const metadata: Metadata = { title: "Product contract" };
+export const metadata: Metadata = { title: "How Hardware works" };
 
 const principles = [
-  { icon: RadioTower, title: "Descriptions are source feeds", text: "Hardware reads public video descriptions through the official YouTube Data API and preserves exact timestamp provenance." },
-  { icon: BotOff, title: "No AI in version one", text: "Parsing, matching, metadata, ranking, and review are deterministic. No transcript, embedding, summary, or agent call is made." },
-  { icon: GitBranch, title: "Repository matches are conservative", text: "Direct repository identities may attach. Similar GitHub search results always wait for an administrator decision." },
-  { icon: Search, title: "Search the evidence", text: "Names, metadata, topics, repositories, source titles, collection names, and your own notes are indexed with visibility boundaries." },
-  { icon: ShieldCheck, title: "Private alpha", text: "Clerk gates production access. Server-side roles and ownership checks protect every mutation and private field." },
-  { icon: Database, title: "PostgreSQL is authoritative", text: "Project identity, sightings, collections, jobs, and audits live in PostgreSQL on the existing Contabo deployment." },
+  {
+    icon: RadioTower,
+    title: "Descriptions are source feeds",
+    text: "Hardware reads video descriptions through the official YouTube Data API and keeps timestamped provenance for every detected project.",
+  },
+  {
+    icon: VideoOff,
+    title: "Metadata, never media",
+    text: "No video, audio, frame, caption, transcript, or browser scrape is downloaded. Only provider metadata and linked project evidence are stored.",
+  },
+  {
+    icon: CalendarClock,
+    title: "One-off or monitored",
+    text: "A video link is imported once. A channel can run manually, daily, or weekly and performs one catch-up run after this app has been offline.",
+  },
+  {
+    icon: GitBranch,
+    title: "Repository matches stay conservative",
+    text: "Direct repository identities may attach automatically. Similar search results wait for your explicit decision.",
+  },
+  {
+    icon: Search,
+    title: "Search the evidence",
+    text: "Names, topics, repositories, source titles, collection names, and your own notes become one searchable personal library.",
+  },
+  {
+    icon: ShieldCheck,
+    title: "Local by construction",
+    text: "The app listens on this computer only. Do not expose its port to a network or tunnel.",
+  },
+  {
+    icon: Database,
+    title: "PostgreSQL is authoritative",
+    text: "Project identity, sightings, collections, activity, and decisions live in a persistent local Docker volume.",
+  },
+  {
+    icon: HardDrive,
+    title: "Backups are encrypted",
+    text: "Host backup files are encrypted before they leave the temporary backup container, with seven daily and four weekly restore points.",
+  },
+  {
+    icon: BotOff,
+    title: "AI and Instagram come later",
+    text: "Version 1.1 uses deterministic parsing and matching. AI analysis, repository chat, Instagram, and other social video sources are intentionally out of scope.",
+  },
 ];
 
 export default function DocsPage() {
   return (
     <>
-      <PageHeading eyebrow="Version 1 contract" title="How Hardware works" description="The operating principles behind the catalog. The complete engineering specification and BDD feature files live with the source." />
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {principles.map(({ icon: Icon, title, text }) => <Card key={title} className="p-5"><span className="grid size-9 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent-strong)]"><Icon className="size-4" /></span><h2 className="mt-4 text-sm font-bold">{title}</h2><p className="mt-2 text-xs leading-5 text-[var(--muted-strong)]">{text}</p></Card>)}
+      <PageHeading
+        eyebrow="Personal Local v1.1"
+        title="How Hardware works"
+        description="The product contract for source capture, deterministic indexing, local operation, and recoverable background work."
+      />
+      <div className="grid grid-cols-3 gap-4">
+        {principles.map(({ icon: Icon, title, text }) => (
+          <Card key={title} className="p-5 shadow-none">
+            <span className="grid size-9 place-items-center rounded-lg bg-[var(--accent-soft)] text-[var(--accent-strong)]">
+              <Icon className="size-4" />
+            </span>
+            <h2 className="mt-4 text-sm font-bold">{title}</h2>
+            <p className="mt-2 text-xs leading-5 text-[var(--muted-strong)]">{text}</p>
+          </Card>
+        ))}
       </div>
     </>
   );

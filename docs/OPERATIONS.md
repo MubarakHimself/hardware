@@ -1,170 +1,192 @@
-# Hardware operations runbook
+# Hardware Personal Local operations
 
-Hardware v1 is a single-node production deployment on the existing Contabo VPS. Docker Compose runs Caddy, the Next.js web process, the Graphile Worker process, and PostgreSQL. The design minimizes paid infrastructure, but the VPS remains a single failure domain; the encrypted off-host database copy is therefore a launch requirement.
+Hardware v1.1 is a single-owner application running on one Windows desktop.
+Docker Compose provides PostgreSQL, migrations, the web process, and Graphile
+Worker. Only the web UI is published, and only on IPv4 loopback.
+The supported interface is a desktop browser at `1024px` wide or larger. There
+is no mobile or tablet UI in this release.
 
-## 1. Host baseline
+## 1. Trust boundary
 
-Provision a supported 64-bit Debian or Ubuntu LTS host with at least 4 GB RAM, current Docker Engine with the Compose plugin, Bash, OpenSSL, Git, curl, restic, and enough disk for two application images plus database growth and local backup retention.
+- Open Hardware only through `http://127.0.0.1:3000` or the configured
+  loopback port.
+- PostgreSQL and Graphile Worker have no host ports.
+- There is no user login. Any request that reaches the web process is treated as
+  the local owner, so public, LAN, tunnel, and VPS exposure are prohibited.
+- Mutations require an HTTP loopback Origin on the configured port. Standard
+  loopback aliases are accepted; Host validation rejects non-loopback requests.
+- SSRF protection, URL credential rejection, payload limits, rate limits,
+  correlation IDs, audit events, and probe authentication remain active.
+- Local malware and privileged browser extensions are inside this trust model;
+  loopback binding is not a sandbox from software already running as the user.
 
-1. Point the application domain's A/AAAA records at the VPS.
-2. Permit inbound SSH, TCP 80, TCP 443, and UDP 443 in the host and provider firewalls. Do not expose PostgreSQL port 5432.
-3. Create `/opt/hardware` as the Git checkout and `/var/backups/hardware` as a root-only backup directory.
-4. Keep Docker and the host security packages patched. Disable password-based SSH and root SSH login after key access is proven.
-5. Copy `.env.example` to `/opt/hardware/.env.production`, fill every required value, then set mode `0600` and root ownership. Never commit this file. Keep values shell-safe; percent-encode the database password inside `DATABASE_URL` while retaining the raw value in `POSTGRES_PASSWORD`.
+An automated Compose test must continue proving that the only published port
+has host IP `127.0.0.1`.
 
-Generate a unique `HEALTHCHECK_TOKEN` with at least 32 characters (for example, `openssl rand -base64 48`). Readiness and metrics accept it only as an `Authorization: Bearer …` credential; never place it in a query parameter or a custom header.
+## 2. First setup
 
-The production Compose network exposes only Caddy. PostgreSQL, Next.js, and the job worker remain on the private bridge network.
+Install current Docker Desktop, PowerShell, and Git for Windows (for the
+supported update command), then run:
 
-## 2. External configuration
-
-### Clerk
-
-Use separate Clerk development and production instances. Enable invitation-only sign-up in the Clerk dashboard, add the production application origin, and register the application's webhook endpoint for user create/update/delete lifecycle events. Put at least one Clerk user ID in `ADMIN_CLERK_USER_IDS`; server-side authorization remains authoritative.
-
-The Docker build needs only `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`. `CLERK_SECRET_KEY` and the webhook signing secret are runtime-only values.
-
-### YouTube and GitHub
-
-Restrict the YouTube Data API key to the required API and the production server where provider controls support it. Set a GitHub token when repository refresh volume would exceed anonymous API limits. Neither secret may appear in browser bundles or logs.
-
-### Off-host backups
-
-Initialize an encrypted restic repository in storage outside the VPS, then set `RESTIC_REPOSITORY` and `RESTIC_PASSWORD`. A same-disk dump protects against application mistakes but not disk or VPS loss and is not an acceptable production backup by itself.
-
-## 3. First deployment
-
-From `/opt/hardware`:
-
-```sh
-chmod 700 deploy/*.sh
-ENV_FILE=/opt/hardware/.env.production deploy/deploy.sh
+```powershell
+.\hardware.ps1 setup
+.\hardware.ps1 start
 ```
 
-The deployment script builds one image tagged with the Git commit, starts PostgreSQL, applies Drizzle and Graphile Worker migrations in a one-shot container, starts web/worker/Caddy, waits for private database/worker readiness, and then verifies public HTTPS liveness. The previously running image is retained as `hardware:rollback`.
+Setup requests the YouTube Data API key and creates:
 
-After the first deployment, verify:
+- `.env.local` with randomly generated PostgreSQL and probe credentials;
+- `.hardware/backup.key`, containing a random local encryption key;
+- `backups/daily` and `backups/weekly` when the first backup runs.
 
-- HTTPS is valid and HTTP redirects to HTTPS.
-- An anonymous request is sent to Clerk sign-in and cannot access product data.
-- The invited admin can sign in and reach every primary navigation surface.
-- `/api/health/live` returns success without revealing infrastructure details.
-- Authenticated readiness reports PostgreSQL and a worker heartbeat.
-- A fixture import completes and is idempotent when retried.
-- Caddy, web, and worker logs contain correlation IDs and no credentials or raw source descriptions.
+Those are the defaults. To relocate encrypted archives or their key, edit
+`HARDWARE_BACKUP_DIR` or `BACKUP_KEY_FILE` in `.env.local` using an unquoted
+relative path beside the project or an absolute Windows path. The launcher
+uses `.env.local` as the authority for these settings and does not let an
+inherited shell variable silently redirect backup or restore operations.
 
-## 4. Routine release procedure
+Do not commit, synchronize, email, or paste `.env.local` or the backup key. A
+GitHub token is optional but recommended for larger repository refresh volumes.
 
-Every release must pass lint, type-check, unit/integration tests, executable BDD scenarios, the production build, and browser journeys before it reaches the VPS.
+Hardware uses the official YouTube Data API. It fetches channel, uploads-list,
+video, and description metadata only. It never downloads video, scrapes the
+YouTube UI, or requests captions.
 
-1. Pull the reviewed commit into `/opt/hardware`.
-2. Confirm migrations are backward-compatible with both the current and new application image. Use expand/contract changes for destructive schema evolution.
-3. Run `deploy/deploy.sh`.
-4. Check `docker compose --env-file .env.production ps` and recent structured logs.
-5. Exercise sign-in, inventory search, a project provenance page, collections, and the admin queue.
+## 3. Start, stop, and status
 
-Do not automatically reverse database migrations during application rollback. If a new image is unhealthy and its migration was backward-compatible, run `deploy/rollback.sh`. Investigate and issue a forward repair migration when database state must change.
-
-## 5. Health and observability
-
-- Liveness answers only whether the Next process can serve requests.
-- Readiness checks PostgreSQL and requires a worker heartbeat newer than 45 seconds. It requires the configured probe token as an `Authorization: Bearer …` credential.
-- The worker writes a heartbeat every 15 seconds and removes it on graceful shutdown.
-- Docker restarts failed services, while Graphile Worker supplies durable retries and exponential backoff.
-- Domain-owned `ingestion_jobs` and `ingestion_events` expose safe progress and terminal errors without exposing Graphile internals.
-- Caddy access logs remove all query strings and referrers and mask client IPs; search terms and Clerk callback parameters must never enter access logs.
-- `GET /api/metrics` emits Prometheus text only after a constant-time check of the same `HEALTHCHECK_TOKEN` accepted by readiness. It never includes source titles, URLs, search terms, user identifiers, or error messages as labels.
-- Database-derived metrics cover queue depth, completed duration and failures, safe quota/fetch codes, worker heartbeat age, and each enabled channel's last successful sync. Search latency is a process-local histogram and resets when the web process restarts.
-
-Operational checks:
-
-```sh
-docker compose --env-file .env.production ps
-docker compose --env-file .env.production logs --since 30m web worker caddy
-docker compose --env-file .env.production exec postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+```powershell
+.\hardware.ps1 start
+.\hardware.ps1 start -NoOpen
+.\hardware.ps1 status
+.\hardware.ps1 stop
 ```
 
-Alert on public liveness failure, readiness failure, disk utilization above 80%, missing backups, PostgreSQL restart, worker heartbeat age above 60 seconds, growing queue depth, three-attempt job failures, quota errors, and a channel with no successful sync for more than 12 hours. An external free uptime probe is useful because an on-host monitor cannot report total VPS failure.
+`start` builds the configured release image when that tag is absent (otherwise
+it reuses the existing image), applies forward migrations, waits for liveness,
+creates a backup if the newest daily copy is stale, and opens the desktop
+browser. `stop` stops normal services without deleting containers or the named
+PostgreSQL volume. `-NoOpen` performs the complete start, readiness, catalog,
+and stale-backup workflow but suppresses the final browser launch; it is useful
+for unattended verification.
 
-### Prometheus scrape configuration
+Docker Desktop must be running for imports and scheduled syncs. After sleep or
+shutdown, the scheduler queues one catch-up run for each overdue Daily or
+Weekly source.
 
-Keep the probe token in a root/Prometheus-readable file outside the Git checkout, for example `/etc/prometheus/secrets/hardware-metrics.token` with mode `0400`. Configure the scrape over public HTTPS; do not put the token in the URL or a query parameter:
+## 4. Source synchronization
 
-```yaml
-scrape_configs:
-  - job_name: hardware
-    scheme: https
-    metrics_path: /api/metrics
-    static_configs:
-      - targets: [hardware.example.com]
-    authorization:
-      type: Bearer
-      credentials_file: /etc/prometheus/secrets/hardware-metrics.token
+Each monitored channel has one of these policies:
+
+- **Manual**: runs only through Sync now.
+- **Daily**: the default; due 24 hours after the last successful run.
+- **Weekly**: due seven days after the last successful run.
+
+Initial history is explicitly bounded by Latest 10, Latest 25, Latest 50, Since
+date, or All history. One-off video imports never enable monitoring for the
+video's creator. Channel jobs are serialized so backfill, manual sync, and
+scheduled polling cannot enumerate the same source concurrently.
+
+Use Activity and Source review to inspect quota errors, terminal failures,
+parser warnings, ignored links, and videos that produced no projects. Retry a
+terminal item only after its underlying problem has been addressed.
+
+## 5. Backups
+
+```powershell
+.\hardware.ps1 backup
+.\hardware.ps1 install-backup-task
 ```
 
-Load [`deploy/prometheus-alerts.yml`](../deploy/prometheus-alerts.yml) into the Prometheus `rule_files` list and validate it with `promtool check rules deploy/prometheus-alerts.yml` before reload. Keep external HTTPS liveness and host disk/PostgreSQL restart alerts alongside these application rules; the application endpoint cannot detect total host loss.
+The backup service creates a PostgreSQL custom-format dump in an ephemeral
+container, encrypts it with AES-256-CBC/PBKDF2 before it enters the host backup
+directory, and writes a SHA-256 checksum. Plaintext is removed when the
+container exits.
 
-### Metrics and alert response
+Retention keeps successful daily archives for seven days and the latest four
+Sunday weekly restore points. The optional Windows task runs at 20:00 when
+Docker Desktop is available. `start` creates a fresh backup whenever the newest
+daily archive is older than 24 hours.
 
-| Alert | First checks | Safe first action |
+`BACKUP_RETENTION_DAYS` accepts `0` through `3650`, and
+`BACKUP_RETENTION_WEEKS` accepts `0` through `520`. Values must be unquoted
+base-10 integers without leading zeroes. Cleanup is limited to generated
+archive names immediately inside the configured `daily` and `weekly`
+directories; it does not recurse into owner-created subdirectories.
+
+The named Docker volume is not a backup. Copy the encrypted backup directory to
+an external disk or private synchronized folder if laptop loss must be covered.
+Keep the encryption key separately; backups cannot be restored without it.
+
+## 6. Restore drill
+
+List the files under the `daily` or `weekly` child of the configured
+`HARDWARE_BACKUP_DIR` (by default `backups/daily` or `backups/weekly`), then run:
+
+```powershell
+.\hardware.ps1 restore -RestoreFile hardware-YYYYMMDDTHHMMSSZ.dump.enc
+```
+
+The command requires typing `RESTORE`, stops web and worker, verifies the
+checksum, decrypts inside the one-shot container, and restores into a temporary
+database. Hardware retains the original database while it migrates and starts
+the restored catalog. Only after a fresh worker heartbeat, readiness check, and
+catalog read does it commit the switch; otherwise it reactivates the original.
+The restore filename must be a basename; paths and traversal are rejected. A
+successful owner restore records `local.restore_succeeded` in Activity. A
+restore performed as part of failed-update recovery records the distinct
+`local.update_rollback_succeeded` event before the final `local.update_failed`
+summary, so recovery is not presented as an unrelated manual restore.
+
+Test a backup after initial setup and after material schema changes.
+
+## 7. Disposable runtime verification
+
+To exercise the complete local lifecycle against disposable data, start Docker
+Desktop and run:
+
+```powershell
+npm run verify:runtime
+```
+
+The verifier creates a GUID-scoped Compose project, random loopback port,
+temporary environment file, temporary encryption key and backup directory, and
+unique image tags. It proves runtime loopback publication, volume persistence
+across PostgreSQL container replacement, encrypted backup/restore, and recovery
+of the prior image and catalog after a deliberately failed candidate. It never
+reads or overwrites `.env.local` and never uses the default `hardware` Compose
+project or volume. Successful runs remove their isolated containers, volume,
+images, and temporary files. Pass `-KeepArtifacts` directly to
+`deploy\verify-local-runtime.ps1` only when retaining disposable evidence for
+diagnosis is intentional.
+
+## 8. Updates
+
+```powershell
+.\hardware.ps1 update
+```
+
+Update always creates a backup first. If a Git remote exists it performs a
+fast-forward-only pull, builds the new Git-tagged image, runs migrations, starts
+the replacement services, and records the new release. Updates are explicit;
+there is no silent schema-changing auto-update.
+
+The running image receives a dedicated rollback tag before writers stop. The
+prior image and pre-update encrypted backup are retained. If a build, migration,
+readiness, or catalog smoke check fails, the launcher restores the backup when
+needed, retags the prior image, and restarts the last healthy catalog.
+
+## 9. Troubleshooting
+
+| Symptom | Check | Response |
 | --- | --- | --- |
-| Metrics missing / worker stale | Read readiness, Compose service state, worker logs, newest `worker_heartbeats.last_seen_at` | Restart only the failed worker after preserving correlation IDs and its last logs. |
-| Queue backlog / repeated failures | Group metrics by task/error code, inspect matching safe `ingestion_events`, confirm PostgreSQL health | Pause the affected schedule or source; do not repeatedly retry quota failures. |
-| Provider quota limited | Confirm the provider and recent request volume without printing credentials | Pause provider-backed schedules until the quota window recovers. |
-| Website fetch failures | Separate policy blocks from DNS/timeouts/HTTP errors using the safe code label | Pause website metadata tasks if failures suggest an SSRF regression. |
-| Channel sync stale | Inspect the channel's latest safe job/event and next-sync time | Retry once only after resolving its terminal or provider cause. |
-| Search latency high | Compare queue/DB pressure, PostgreSQL slow queries, and representative search plans | Preserve evidence, then tune the query/index; do not add an unmeasured search service. |
+| Docker unavailable | Docker Desktop status | Start Docker Desktop, then rerun the command. |
+| UI does not open | `.\hardware.ps1 status` and web health | Inspect the web container's safe structured logs. |
+| Sync is overdue | Worker health and Activity | Start Docker and allow the overdue catch-up job to run once. |
+| YouTube quota error | Latest source-review/job code | Wait for quota recovery; do not repeatedly retry. |
+| Channel produced no projects | Source review and raw description | Open the original video/description and add a manual correction if appropriate. |
+| Backup missing | Backup directory and scheduled task | Run `.\hardware.ps1 backup`; verify Docker and the key file. |
+| Restore checksum failure | Matching `.sha256` and encryption key | Do not restore; recover an intact backup copy. |
 
-## 6. Backup, retention, and restore
-
-Create a dedicated encryption key before enabling the timer. This key is not stored in the database, backup directory, Git, or restic repository and is required for every restore:
-
-```sh
-install -d -o root -g root -m 0700 /root/.config/hardware
-openssl rand -base64 48 > /root/.config/hardware/backup-encryption.key
-chown root:root /root/.config/hardware/backup-encryption.key
-chmod 0400 /root/.config/hardware/backup-encryption.key
-```
-
-Record `BACKUP_ENCRYPTION_KEY_FILE=/root/.config/hardware/backup-encryption.key` in `.env.production`. Store a separate recovery copy of the key in the organization's secrets manager or offline vault; a database archive is permanently unrecoverable without it. Retain prior keys until every backup encrypted with them has expired.
-
-Install the provided systemd unit and timer:
-
-```sh
-install -m 0644 deploy/hardware-backup.service /etc/systemd/system/
-install -m 0644 deploy/hardware-backup.timer /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now hardware-backup.timer
-systemctl list-timers hardware-backup.timer
-```
-
-The backup script streams PostgreSQL custom-format output directly through OpenSSL AES-256-CBC with a random salt and PBKDF2-HMAC-SHA-256 (600,000 iterations) into a mode-`0600` temporary ciphertext, validates the decrypted archive through `pg_restore --list`, and only then atomically persists a `.dump.enc` file and SHA-256 manifest. No plaintext dump file is created. It keeps seven daily and four weekly encrypted local restore points, sends the encrypted daily artifact to the independently encrypted restic repository, and prunes both policies. The script fails before dumping if the encryption key, restic configuration, or required executable is unavailable.
-
-After the first run and after every operational change, check `systemctl status hardware-backup.service`, inspect the newest `.dump.enc` plus adjacent manifest, and confirm the off-host snapshot with `restic snapshots --tag hardware-postgres`. Alert when the service fails or the newest successful artifact is older than 26 hours.
-
-Test restoration before launch and quarterly thereafter on an isolated database/VPS. For an authorized in-place disaster restore:
-
-```sh
-CONFIRM_RESTORE=hardware \
-  ENV_FILE=/opt/hardware/.env.production \
-  deploy/restore.sh /var/backups/hardware/daily/hardware-YYYY-MM-DD.dump.enc
-```
-
-Restore requires the adjacent `.sha256` manifest, verifies the encrypted artifact, and decrypts it only as a pipe into `pg_restore`. A full archive-list preflight with the configured key completes before downtime. The actual clean restore runs in one database transaction; if restore or forward migration fails, web and worker remain stopped for investigation. On success it reapplies forward migrations and restarts application processes. Verify row counts, user ownership, source provenance, collection state, job history, readiness, metrics, and the primary browser journeys before declaring recovery complete.
-
-## 7. Incident handling
-
-1. Preserve the release SHA, correlation/job IDs, timestamps, and relevant redacted structured logs.
-2. Stop only the affected mutation path when possible; read-only access may remain available.
-3. Never paste environment files, Clerk tokens, API keys, notes, raw descriptions, or fetched HTML into tickets or chat.
-4. For a compromised credential, rotate it at the provider, update `.env.production`, recreate affected containers, and inspect audit/job history.
-5. For suspected SSRF, stop website-metadata workers, preserve the safe event record, and verify that no private-address connection was made.
-6. For provider quota exhaustion, pause the relevant schedule rather than repeatedly retrying.
-
-## 8. Capacity and maintenance
-
-Start Graphile Worker at concurrency four, then tune using CPU, memory, provider quotas, PostgreSQL connections, and observed task duration. Keep total web and worker pool limits below PostgreSQL's reserved connection capacity. Run `VACUUM (ANALYZE)` through normal autovacuum; investigate table/index bloat before scheduling manual maintenance.
-
-Before significant channel backfills, check YouTube quota and database disk headroom. Search performance must be measured against representative data; maintain the `pg_trgm` and full-text indexes and inspect slow queries rather than adding a second search service in v1.
-
-OpenShip may later operate these same containers, but v1 deployment and recovery must remain valid with standard Docker Compose alone.
+Logs and audit summaries must never contain provider credentials, full notes,
+raw fetched HTML, or complete descriptions. Safe errors and correlation IDs are
+the intended diagnostic surface.

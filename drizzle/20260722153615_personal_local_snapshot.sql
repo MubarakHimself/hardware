@@ -1,0 +1,6 @@
+-- Schema snapshot checkpoint only.
+--
+-- The executable local-identity and personal-ingestion changes are applied by
+-- 20260722210000_local_identity.sql and
+-- 20260722220000_personal_ingestion.sql. This no-op migration gives Drizzle a
+-- current schema snapshot without applying those hand-authored changes twice.

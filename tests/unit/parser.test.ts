@@ -98,7 +98,7 @@ describe("YouTube description parser", () => {
     ).toHaveLength(2);
   });
 
-  it("associates a URL on the next line or after one blank only", () => {
+  it("associates a URL anywhere in the complete timestamp block", () => {
     const parsed = parseYouTubeDescription({
       videoId: "continuations",
       description: [
@@ -117,22 +117,10 @@ describe("YouTube description parser", () => {
     expect(parsed.mentions.map((mention) => mention.name)).toEqual([
       "Immediate",
       "One blank",
+      "Too far",
     ]);
-    expect(parsed.rejectedRows).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          timestampText: "00:03",
-          reason: "NO_EXTERNAL_URL",
-        }),
-      ]),
-    );
-    expect(parsed.ignoredLinks).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          rawUrl: "https://example.com/too-far",
-          reason: "UNSCOPED_URL",
-        }),
-      ]),
+    expect(parsed.mentions[2].rawSegment).toBe(
+      "00:03 - Too far\n\n\nhttps://example.com/too-far",
     );
   });
 
@@ -193,6 +181,9 @@ describe("YouTube description parser", () => {
 
     expect(parsed.mentions).toHaveLength(1);
     expect(parsed.mentions[0].links).toHaveLength(1);
+    expect(parsed.mentions[0].rawSegment).toContain(
+      "Channel https://youtube.com/@example",
+    );
     expect(parsed.ignoredLinks).toHaveLength(4);
     expect(parsed.ignoredLinks).toEqual(
       expect.arrayContaining([

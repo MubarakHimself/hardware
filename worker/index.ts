@@ -7,6 +7,7 @@ import { closeDatabase, getPool } from "../db/index";
 import { createTaskList } from "./tasks";
 import { createRuntimeTaskImplementations } from "./implementations/runtime";
 import { logger, safeErrorDetails } from "./logger";
+import { scheduleOverdueChannelPolls } from "./scheduler";
 
 const environmentSchema = z.object({
   DATABASE_URL: z.string().url().startsWith("postgresql://"),
@@ -45,6 +46,7 @@ async function writeHeartbeat(): Promise<void> {
 async function main(): Promise<void> {
   const taskImplementations = createRuntimeTaskImplementations();
   await writeHeartbeat();
+  await scheduleOverdueChannelPolls();
   const heartbeat = setInterval(() => {
     void writeHeartbeat().catch((error: unknown) => {
       logger.error({ event: "heartbeat_failed", ...safeErrorDetails(error) });

@@ -12,6 +12,7 @@ import { getServerConfig } from "./config";
 import { getDemoState } from "./demo-store";
 import { conflict, notFound } from "./errors";
 import { addTrackedGraphileJob } from "./job-queue";
+import { findActiveChannelJob, lockChannelJobLane } from "./channel-jobs";
 import type { DemoStoredJob } from "./demo-store";
 
 export interface JobDto {
@@ -440,10 +441,29 @@ export async function retryJob(options: {
     if (job.state !== "failed") {
       throw conflict("job_not_retryable", "Only a terminal failed job can be retried.");
     }
+    const isChannelJob =
+      job.type === "channel_backfill" || job.type === "channel_poll";
+    if (isChannelJob) {
+      await lockChannelJobLane(client, String(job.scope_id));
+      const activeJob = await findActiveChannelJob(
+        client,
+        String(job.scope_id),
+        String(job.id),
+      );
+      if (activeJob) {
+        await client.query("commit");
+        return {
+          id: activeJob.id,
+          state: activeJob.state,
+          created: false,
+        };
+      }
+    }
     const retryPayload: Record<string, unknown> =
       job.checkpoint && typeof job.checkpoint === "object" ? job.checkpoint : {};
-    if (job.type === "channel_backfill" || job.type === "channel_poll") {
+    if (isChannelJob) {
       retryPayload.channelSourceId = job.scope_id;
+      delete retryPayload.enumerationComplete;
     } else if (
       (job.type === "video_ingest" || job.type === "youtube_revalidate") &&
       job.scope_type === "video"
@@ -457,15 +477,34 @@ export async function retryJob(options: {
       jobId: job.id,
       correlationId: options.correlationId,
       jobKey: `hardware:retry:${job.id}:${randomUUID()}`,
+      queueName: isChannelJob
+        ? `channel:${job.scope_id}`
+        : job.type === "video_ingest" || job.type === "youtube_revalidate"
+          ? `video:${job.scope_id}`
+          : undefined,
       payload: retryPayload,
     });
     await client.query(
       `update ingestion_jobs set state = 'queued', attempts = 0,
         graphile_job_id = $1, safe_error_code = null, safe_error_summary = null,
-        started_at = null, finished_at = null, updated_at = now()
+        checkpoint = $3::jsonb, started_at = null, finished_at = null,
+        updated_at = now()
        where id = $2::uuid`,
-      [graphileId, job.id],
+      [graphileId, job.id, JSON.stringify(retryPayload)],
     );
+    if (
+      (job.type === "video_ingest" || job.type === "youtube_revalidate") &&
+      typeof retryPayload.parentJobId === "string"
+    ) {
+      await client.query(
+        `update ingestion_jobs
+            set state = 'running', finished_at = null, updated_at = now()
+          where id = $1::uuid
+            and type in ('channel_backfill', 'channel_poll')
+            and state = 'succeeded'`,
+        [retryPayload.parentJobId],
+      );
+    }
     await client.query(
       `insert into audit_events
         (actor_user_id, action, target_type, target_id, correlation_id, after_summary)

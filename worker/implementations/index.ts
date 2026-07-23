@@ -19,11 +19,25 @@ import { SafeJobError, trackedJobPayloadSchema, type TrackedJobPayload } from ".
 import type { TaskImplementation, TaskImplementations } from "../tasks";
 import type { EnqueueChildJob, IngestionStore, StoredVideo } from "./contracts";
 
-const channelPayloadSchema = trackedJobPayloadSchema.extend({ channelSourceId: z.uuid() });
+const channelResolvePayloadSchema = trackedJobPayloadSchema.extend({
+  url: z.url().max(4_096),
+  requestedByUserId: z.uuid().optional(),
+});
+
+const channelPayloadSchema = trackedJobPayloadSchema.extend({
+  channelSourceId: z.uuid(),
+  historyMode: z.enum(["latest_10", "latest_25", "latest_50", "since", "all"]).optional(),
+  historySince: z.iso.datetime({ offset: true }).optional(),
+}).refine(
+  (value) => value.historyMode !== "since" || Boolean(value.historySince),
+  "A since date is required for since-mode backfills.",
+);
 const videoPayloadSchema = trackedJobPayloadSchema.extend({
   videoSourceId: z.uuid().optional(),
   url: z.string().max(4_096).optional(),
   parentJobId: z.uuid().optional(),
+  useStoredMetadata: z.boolean().optional(),
+  sourceUnavailable: z.boolean().optional(),
 });
 const websitePayloadSchema = trackedJobPayloadSchema.extend({
   projectId: z.uuid().optional(),
@@ -43,7 +57,14 @@ const repositoryRefreshPayloadSchema = trackedJobPayloadSchema.extend({ reposito
 
 export interface TaskImplementationDependencies {
   store: IngestionStore;
-  youtube: Pick<YouTubeClient, "getChannelById" | "getVideo" | "listUploadsPage">;
+  youtube: Pick<
+    YouTubeClient,
+    | "resolveChannel"
+    | "getChannelById"
+    | "getVideo"
+    | "getVideos"
+    | "listUploadsPage"
+  >;
   github: Pick<GitHubClient, "getRepository" | "searchRepositories">;
   enqueue: EnqueueChildJob;
   fetchWebsite?: (url: string) => Promise<WebsiteMetadata>;
@@ -87,6 +108,56 @@ export function createTaskImplementations(dependencies: TaskImplementationDepend
   const websiteFetcher = dependencies.fetchWebsite ?? ((url: string) => fetchWebsiteMetadata(url));
   const maximumChannelPages = Math.max(1, Math.min(dependencies.maximumChannelPages ?? 10_000, 10_000));
 
+  const resolveChannelSubscription: TaskImplementation = async (rawPayload) => {
+    const payload = channelResolvePayloadSchema.parse(rawPayload);
+    try {
+      const resolved = await youtube.resolveChannel(payload.url);
+      const subscription = await store.ensureChannelSubscription(resolved, {
+        subscriptionJobId: payload.jobId,
+        requestedByUserId: payload.requestedByUserId,
+      });
+      if (subscription.backfillPending) {
+        const subscriptionJobId = subscription.subscriptionJobId;
+        if (!subscriptionJobId) {
+          throw new SafeJobError(
+            "CHANNEL_SUBSCRIPTION_STATE_INVALID",
+            "The pending channel subscription has no durable job identity.",
+            true,
+          );
+        }
+        await enqueue(
+          "channel_backfill",
+          {
+            scopeType: "channel",
+            scopeId: subscription.channel.id,
+            payload: {
+              channelSourceId: subscription.channel.id,
+              historyMode: "latest_25",
+              subscriptionJobId,
+            },
+            queueName: `channel:${subscription.channel.id}`,
+          },
+          childBucket("channel-subscription", subscriptionJobId),
+        );
+        const confirmed = await store.confirmChannelSubscriptionBackfill(
+          subscription.channel.id,
+          subscriptionJobId,
+          payload.jobId,
+        );
+        if (!confirmed) {
+          throw new SafeJobError(
+            "CHANNEL_BACKFILL_LANE_BUSY",
+            "The channel subscription is durable but its initial backfill is waiting for the channel lane.",
+            true,
+          );
+        }
+      }
+      await store.updateJobProgress(payload.jobId, 1, 1);
+    } catch (error) {
+      taskError(error);
+    }
+  };
+
   const syncChannel = (backfill: boolean): TaskImplementation => async (rawPayload) => {
     const payload = channelPayloadSchema.parse(rawPayload);
     try {
@@ -99,28 +170,77 @@ export function createTaskImplementations(dependencies: TaskImplementationDepend
       let completed = 0;
       let stop = false;
       let pageLimitExceeded = false;
+      const historyLimit = backfill
+        ? payload.historyMode === "latest_10"
+          ? 10
+          : payload.historyMode === "latest_50"
+            ? 50
+            : payload.historyMode === "all"
+              ? Number.POSITIVE_INFINITY
+              : payload.historyMode === "since"
+                ? Number.POSITIVE_INFINITY
+                : 25
+        : Number.POSITIVE_INFINITY;
+      const historySince = payload.historySince
+        ? new Date(payload.historySince).getTime()
+        : undefined;
 
       for (let pageNumber = 0; pageNumber < maximumChannelPages && !stop; pageNumber += 1) {
         const page = await youtube.listUploadsPage(channel.uploadsPlaylistId, pageToken);
         firstVideoId ??= page.items[0]?.videoId;
+        const selectedUploads: typeof page.items = [];
         for (const upload of page.items) {
           if (!backfill && previousLastSeen && upload.videoId === previousLastSeen) {
             stop = true;
             break;
           }
-          const video = await store.upsertDiscoveredVideo(channel.id, upload);
+          if (
+            backfill &&
+            historySince !== undefined &&
+            upload.publishedAt &&
+            new Date(upload.publishedAt).getTime() < historySince
+          ) {
+            stop = true;
+            break;
+          }
+          if (backfill && completed + selectedUploads.length >= historyLimit) {
+            stop = true;
+            break;
+          }
+          selectedUploads.push(upload);
+        }
+
+        // Playlist pages contain at most 50 uploads, which exactly matches the
+        // YouTube videos.list batch limit. Persist the metadata once here and
+        // keep parsing in independent child jobs for isolation and retryability.
+        const metadataByVideoId = new Map(
+          (await youtube.getVideos(selectedUploads.map((upload) => upload.videoId)))
+            .map((metadata) => [metadata.id, metadata] as const),
+        );
+        for (const upload of selectedUploads) {
+          let video = await store.upsertDiscoveredVideo(channel.id, upload);
+          const metadata = metadataByVideoId.get(upload.videoId);
+          if (metadata) {
+            video = await store.upsertVideo(channel.id, metadata);
+          }
           await enqueue(
             "video_ingest",
             {
               scopeType: "video",
               scopeId: video.id,
-              payload: { videoSourceId: video.id, parentJobId: payload.jobId },
+              payload: {
+                videoSourceId: video.id,
+                parentJobId: payload.jobId,
+                ...(metadata
+                  ? { useStoredMetadata: true }
+                  : { sourceUnavailable: true }),
+              },
               queueName: `video:${video.id}`,
             },
-            childBucket("video", video.youtubeVideoId),
+            childBucket("channel-video", payload.jobId, video.youtubeVideoId),
           );
           completed += 1;
-          await store.updateJobProgress(payload.jobId, completed, completed);
+          await store.updateJobProgress(payload.jobId, 0, completed);
         }
         if (stop || !page.nextPageToken) break;
         if (pageNumber === maximumChannelPages - 1) {
@@ -132,7 +252,15 @@ export function createTaskImplementations(dependencies: TaskImplementationDepend
         pageToken = page.nextPageToken;
       }
       if (pageLimitExceeded) throw new SafeJobError("YOUTUBE_PAGE_LIMIT_EXCEEDED", "The channel exceeded the bounded page limit; the checkpoint was not advanced.", true);
-      await store.completeChannelSync(channel.id, { ...channel.checkpoint, lastSeenVideoId: firstVideoId ?? previousLastSeen ?? null, syncedAt: new Date().toISOString() });
+      await store.completeChannelSync(
+        channel.id,
+        {
+          ...channel.checkpoint,
+          lastSeenVideoId: firstVideoId ?? previousLastSeen ?? null,
+          syncedAt: new Date().toISOString(),
+        },
+        payload.jobId,
+      );
     } catch (error) {
       const safe = safeSourceError(error, "CHANNEL_SYNC_FAILED", "Channel synchronization failed; review the correlated ingestion event.");
       await store.markChannelError(payload.channelSourceId, safe.code, safe.message).catch(() => undefined);
@@ -155,7 +283,31 @@ export function createTaskImplementations(dependencies: TaskImplementationDepend
         throw new SafeJobError("VIDEO_REFERENCE_REQUIRED", "A YouTube video source or URL is required.", false);
       }
 
-      const source = await youtube.getVideo(youtubeVideoId);
+      if (payload.sourceUnavailable) {
+        if (!storedVideo) {
+          throw new SafeJobError("VIDEO_SOURCE_NOT_FOUND", "The unavailable video source does not exist.", false);
+        }
+        await store.markVideoUnavailable(storedVideo.id, payload.correlationId);
+        await store.updateJobProgress(payload.jobId, 1, 1);
+        return;
+      }
+
+      const useStoredMetadata = Boolean(
+        payload.useStoredMetadata &&
+        storedVideo?.metadataReady &&
+        storedVideo.youtubeChannelId &&
+        storedVideo.title !== undefined &&
+        storedVideo.description !== undefined,
+      );
+      const source = useStoredMetadata && storedVideo
+        ? {
+            id: storedVideo.youtubeVideoId,
+            channelId: storedVideo.youtubeChannelId!,
+            title: storedVideo.title!,
+            description: storedVideo.description!,
+            durationSeconds: storedVideo.durationSeconds,
+          }
+        : await youtube.getVideo(youtubeVideoId);
       if (!source) {
         if (storedVideo) {
           await store.markVideoUnavailable(storedVideo.id, payload.correlationId);
@@ -164,9 +316,15 @@ export function createTaskImplementations(dependencies: TaskImplementationDepend
         }
         throw new SafeJobError("YOUTUBE_VIDEO_UNAVAILABLE", "The YouTube video is unavailable.", false);
       }
-      const channel = await youtube.getChannelById(source.channelId);
-      const storedChannel = await store.upsertChannel(channel);
-      storedVideo = await store.upsertVideo(storedChannel.id, source);
+      if (!storedVideo) {
+        const channel = await youtube.getChannelById(source.channelId);
+        const storedChannel = await store.upsertChannel(channel, {
+          monitoringEnabled: false,
+        });
+        storedVideo = await store.upsertVideo(storedChannel.id, source);
+      } else if (!useStoredMetadata) {
+        storedVideo = await store.upsertVideo(storedVideo.channelId, source);
+      }
       const parsed = parseYouTubeDescription({ videoId: source.id, description: source.description, durationSeconds: source.durationSeconds });
       const targets = await store.ingestParsedVideo(
         storedVideo,
@@ -175,6 +333,7 @@ export function createTaskImplementations(dependencies: TaskImplementationDepend
         purgeMissingRawSegments,
         payload.correlationId,
       );
+      await store.recordSourceReview(storedVideo.id, payload.jobId, parsed);
 
       for (const target of targets.repositoryTargets) {
         const reference = parseGitHubRepositoryReference(target.url);
@@ -275,6 +434,7 @@ export function createTaskImplementations(dependencies: TaskImplementationDepend
   };
 
   return {
+    channel_resolve: resolveChannelSubscription,
     channel_backfill: syncChannel(true),
     channel_poll: syncChannel(false),
     video_ingest: (payload) => ingestVideo(payload, false),

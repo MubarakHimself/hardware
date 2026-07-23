@@ -54,7 +54,7 @@ export async function readiness(request: Request) {
 
   return {
     status: "ready",
-    mode: "production",
+    mode: "local",
     database: "ready",
     worker: "ready",
     release: config.releaseSha,

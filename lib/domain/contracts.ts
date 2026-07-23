@@ -27,12 +27,14 @@ export type LinkVerificationState =
 
 export const IMPORT_KINDS = [
   "youtube_video",
+  "youtube_channel",
   "website",
   "github_repository",
 ] as const;
 export type ImportKind = (typeof IMPORT_KINDS)[number];
 
 export const INGESTION_JOB_TYPES = [
+  "channel_resolve",
   "channel_backfill",
   "channel_poll",
   "video_ingest",
@@ -74,6 +76,43 @@ export const SOURCE_AVAILABILITIES = [
 ] as const;
 export type SourceAvailability = (typeof SOURCE_AVAILABILITIES)[number];
 
+export const CHANNEL_SYNC_FREQUENCIES = [
+  "manual",
+  "daily",
+  "weekly",
+] as const;
+export type ChannelSyncFrequency =
+  (typeof CHANNEL_SYNC_FREQUENCIES)[number];
+
+export const CHANNEL_HISTORY_MODES = [
+  "latest_10",
+  "latest_25",
+  "latest_50",
+  "since",
+  "all",
+] as const;
+export type ChannelHistoryMode = (typeof CHANNEL_HISTORY_MODES)[number];
+
+export const IMPORT_BATCH_STATES = [
+  "processing",
+  "queued",
+  "succeeded",
+  "partial",
+  "failed",
+] as const;
+export type ImportBatchState = (typeof IMPORT_BATCH_STATES)[number];
+
+export const IMPORT_BATCH_ITEM_STATES = [
+  "queued",
+  "duplicate",
+  "invalid",
+] as const;
+export type ImportBatchItemState =
+  (typeof IMPORT_BATCH_ITEM_STATES)[number];
+
+export const SOURCE_REVIEW_STATES = ["open", "resolved", "ignored"] as const;
+export type SourceReviewState = (typeof SOURCE_REVIEW_STATES)[number];
+
 export const REPOSITORY_FILTERS = ["none", "pending", "attached"] as const;
 export type RepositoryFilter = (typeof REPOSITORY_FILTERS)[number];
 
@@ -92,11 +131,10 @@ export type ProjectSort = (typeof PROJECT_SORTS)[number];
 export const PROJECT_VIEWS = ["cards", "list"] as const;
 export type ProjectView = (typeof PROJECT_VIEWS)[number];
 
-/** A signed-in Hardware user resolved from Clerk to the internal users row. */
+/** The internal Hardware actor used for ownership and audit foreign keys. */
 export interface AuthenticatedActor {
-  /** Internal users.id; ownership foreign keys must never store the Clerk subject. */
+  /** Internal users.id. Persistent local mode always uses one stable owner. */
   userId: string;
-  clerkUserId?: string;
   role: UserRole;
 }
 

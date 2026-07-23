@@ -74,9 +74,7 @@ export function canReadCollection(
     return false;
   }
 
-  return (
-    collection.ownerId === actor.userId || collection.visibility === "workspace"
-  );
+  return collection.ownerId === actor.userId;
 }
 
 /** Admin status does not override ownership of a member's collection. */

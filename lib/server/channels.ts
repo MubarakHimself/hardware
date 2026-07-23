@@ -2,7 +2,12 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { getPool } from "../../db/index";
-import type { AuthenticatedActor } from "../domain";
+import {
+  CHANNEL_SYNC_FREQUENCIES,
+  type AuthenticatedActor,
+  type ChannelHistoryMode,
+  type ChannelSyncFrequency,
+} from "../domain";
 import {
   IntegrationError,
   parseYouTubeChannelReference,
@@ -12,12 +17,51 @@ import { getServerConfig } from "./config";
 import { getDemoState } from "./demo-store";
 import { ApiError, notFound } from "./errors";
 import { addTrackedGraphileJob } from "./job-queue";
+import { findActiveChannelJob, lockChannelJobLane } from "./channel-jobs";
+
+const initialHistorySchema = z.union([
+  z.object({ mode: z.enum(["latest_10", "latest_25", "latest_50", "all"]) }).strict(),
+  z.object({ mode: z.literal("since"), since: z.iso.datetime({ offset: true }) }).strict(),
+  z.object({
+    mode: z.literal("since"),
+    since: z.iso.date(),
+    // Minutes east of UTC, matching Date#getTimezoneOffset with its sign
+    // inverted. Requiring it avoids interpreting a personal date as UTC.
+    utcOffsetMinutes: z.number().int().min(-840).max(840),
+  }).strict(),
+]);
+
+export function historySinceInstant(
+  history: z.infer<typeof initialHistorySchema>,
+): Date | null {
+  if (history.mode !== "since") return null;
+  if (history.since.includes("T")) return new Date(history.since);
+  const [year, month, day] = history.since.split("-").map(Number);
+  const utcOffsetMinutes = "utcOffsetMinutes" in history
+    ? history.utcOffsetMinutes
+    : 0;
+  return new Date(
+    Date.UTC(year, month - 1, day) - utcOffsetMinutes * 60_000,
+  );
+}
 
 export const channelCreateSchema = z
   .object({
     url: z.string().trim().min(2).max(500),
+    syncFrequency: z.enum(CHANNEL_SYNC_FREQUENCIES).default("daily"),
+    initialHistory: initialHistorySchema.default({ mode: "latest_25" }),
   })
   .strict();
+
+export const channelUpdateSchema = z
+  .object({
+    syncFrequency: z.enum(CHANNEL_SYNC_FREQUENCIES).optional(),
+    paused: z.boolean().optional(),
+  })
+  .strict()
+  .refine((value) => value.syncFrequency !== undefined || value.paused !== undefined, {
+    message: "Provide a sync frequency or paused state.",
+  });
 
 export interface ChannelDto {
   id: string;
@@ -35,6 +79,11 @@ export interface ChannelDto {
   lastSyncedAt: string | null;
   nextSyncAt: string | null;
   retryableJobId: string | null;
+  monitored: boolean;
+  paused: boolean;
+  syncFrequency: ChannelSyncFrequency;
+  initialHistoryMode: ChannelHistoryMode;
+  initialHistorySince: string | null;
 }
 
 function dateText(value: unknown): string | null {
@@ -62,6 +111,11 @@ function demoChannelDto(
     nextSyncAt: channel.nextSync,
     retryableJobId:
       channel.status === "attention" ? `failed-${channel.id}` : null,
+    monitored: true,
+    paused: false,
+    syncFrequency: "daily",
+    initialHistoryMode: "latest_25",
+    initialHistorySince: null,
   };
 }
 
@@ -81,7 +135,7 @@ function lookupFromInput(value: string): { id?: string; handle?: string } {
 
 async function resolveYouTubeChannel(value: string) {
   const config = getServerConfig();
-  if (config.mode !== "production") throw new Error("Production channel resolution called in demo mode.");
+  if (config.mode !== "local") throw new Error("Persistent channel resolution called in demo mode.");
   try {
     const channel = await new YouTubeClient({
       apiKey: config.youtubeApiKey,
@@ -123,6 +177,10 @@ export async function listChannels(): Promise<ChannelDto[]> {
   const result = await getPool().query(
     `select c.id, c.youtube_channel_id as "youtubeChannelId", c.title, c.handle,
       c.canonical_url as "canonicalUrl", c.thumbnail_url as "thumbnailUrl",
+      c.enabled as monitored, c.state = 'paused' as paused,
+      c.sync_frequency as "syncFrequency",
+      c.initial_history_mode as "initialHistoryMode",
+      c.initial_history_since as "initialHistorySince",
       case
         when latest.state in ('queued', 'running') or children.active_count > 0
           then 'syncing'
@@ -194,6 +252,7 @@ export async function listChannels(): Promise<ChannelDto[]> {
        order by child.finished_at desc nulls last, child.created_at desc
        limit 1
     ) child_failure on true
+    where c.enabled = true
     group by c.id, latest.id, latest.state, latest.total_items, latest.completed_items,
              latest.warning_count, latest.failure_count,
              children.total_count, children.completed_count,
@@ -222,6 +281,11 @@ export async function listChannels(): Promise<ChannelDto[]> {
     retryableJobId: row.retryableJobId
       ? String(row.retryableJobId)
       : null,
+    monitored: Boolean(row.monitored),
+    paused: Boolean(row.paused),
+    syncFrequency: row.syncFrequency as ChannelSyncFrequency,
+    initialHistoryMode: row.initialHistoryMode as ChannelHistoryMode,
+    initialHistorySince: dateText(row.initialHistorySince),
   }));
 }
 
@@ -236,7 +300,7 @@ export async function addChannel(options: {
     const handle = lookup.handle ? `@${lookup.handle}` : `@channel-${state.channels.length + 1}`;
     const existing = state.channels.find((channel) => channel.handle.toLowerCase() === handle.toLowerCase());
     if (existing) {
-      return { channel: demoChannelDto(existing), created: false, jobId: null };
+      return { channel: demoChannelDto(existing), created: false, monitoringStarted: false, jobId: null };
     }
     const channel = {
       id: randomUUID(),
@@ -255,71 +319,162 @@ export async function addChannel(options: {
     return {
       channel: demoChannelDto(channel),
       created: true,
+      monitoringStarted: true,
       jobId: `backfill-${channel.id}`,
     };
   }
 
   const channel = await resolveYouTubeChannel(options.input.url);
+  const historyMode = options.input.initialHistory.mode;
+  const historySince = historySinceInstant(options.input.initialHistory);
   const client = await getPool().connect();
   try {
     await client.query("begin");
-    const inserted = await client.query(
-      `insert into channel_sources
-        (youtube_channel_id, uploads_playlist_id, handle, title, canonical_url,
-         thumbnail_url, created_by_user_id, next_sync_at)
-       values ($1, $2, $3, $4, $5, $6, $7::uuid, now())
-       on conflict (youtube_channel_id) do nothing
-       returning id, youtube_channel_id as "youtubeChannelId", title, handle,
-                 canonical_url as "canonicalUrl", thumbnail_url as "thumbnailUrl",
-                 last_synced_at as "lastSyncedAt", next_sync_at as "nextSyncAt"`,
-      [channel.youtubeChannelId, channel.uploadsPlaylistId, channel.handle, channel.title, channel.canonicalUrl, channel.thumbnailUrl, options.actor.userId],
+    const existing = await client.query(
+      `select id, enabled, state, sync_frequency as "syncFrequency",
+              initial_history_mode as "initialHistoryMode",
+              initial_history_since as "initialHistorySince",
+              last_synced_at as "lastSyncedAt",
+              next_sync_at as "nextSyncAt"
+         from channel_sources
+        where youtube_channel_id = $1 for update`,
+      [channel.youtubeChannelId],
     );
-    const created = Boolean(inserted.rows[0]);
-    const record =
-      inserted.rows[0] ??
-      (
-        await client.query(
-          `update channel_sources set uploads_playlist_id = $2, handle = $3,
-             title = $4, canonical_url = $5, thumbnail_url = $6, updated_at = now()
-           where youtube_channel_id = $1
-           returning id, youtube_channel_id as "youtubeChannelId", title, handle,
-                     canonical_url as "canonicalUrl", thumbnail_url as "thumbnailUrl",
-                     last_synced_at as "lastSyncedAt", next_sync_at as "nextSyncAt"`,
-          [channel.youtubeChannelId, channel.uploadsPlaylistId, channel.handle, channel.title, channel.canonicalUrl, channel.thumbnailUrl],
-        )
-      ).rows[0];
+    const created = !existing.rows[0];
+    const monitoringStarted = created || !Boolean(existing.rows[0]?.enabled);
+    const record = created
+      ? (
+          await client.query(
+            `insert into channel_sources
+              (youtube_channel_id, uploads_playlist_id, handle, title,
+               canonical_url, thumbnail_url, created_by_user_id, enabled,
+               state, sync_frequency, initial_history_mode,
+               initial_history_since, next_sync_at)
+             values ($1, $2, $3, $4, $5, $6, $7::uuid, true, 'active',
+                     $8, $9, $10, null)
+             returning id, youtube_channel_id as "youtubeChannelId", title,
+                       handle, canonical_url as "canonicalUrl",
+                       thumbnail_url as "thumbnailUrl",
+                       state, sync_frequency as "syncFrequency",
+                       initial_history_mode as "initialHistoryMode",
+                       initial_history_since as "initialHistorySince",
+                       last_synced_at as "lastSyncedAt",
+                       next_sync_at as "nextSyncAt"`,
+            [
+              channel.youtubeChannelId,
+              channel.uploadsPlaylistId,
+              channel.handle,
+              channel.title,
+              channel.canonicalUrl,
+              channel.thumbnailUrl,
+              options.actor.userId,
+              options.input.syncFrequency,
+              historyMode,
+              historySince,
+            ],
+          )
+        ).rows[0]
+      : monitoringStarted
+        ? (
+          await client.query(
+            `update channel_sources
+                set uploads_playlist_id = $2, handle = $3, title = $4,
+                    canonical_url = $5, thumbnail_url = $6, enabled = true,
+                    state = 'active', sync_frequency = $7,
+                    initial_history_mode = $8, initial_history_since = $9,
+                    next_sync_at = null,
+                    last_error_code = null, last_error_summary = null,
+                    updated_at = now()
+              where youtube_channel_id = $1
+              returning id, youtube_channel_id as "youtubeChannelId", title,
+                        handle, canonical_url as "canonicalUrl",
+                        thumbnail_url as "thumbnailUrl",
+                        state, sync_frequency as "syncFrequency",
+                        initial_history_mode as "initialHistoryMode",
+                        initial_history_since as "initialHistorySince",
+                        last_synced_at as "lastSyncedAt",
+                        next_sync_at as "nextSyncAt"`,
+            [
+              channel.youtubeChannelId,
+              channel.uploadsPlaylistId,
+              channel.handle,
+              channel.title,
+              channel.canonicalUrl,
+              channel.thumbnailUrl,
+              options.input.syncFrequency,
+              historyMode,
+              historySince,
+            ],
+          )
+        ).rows[0]
+        : (
+          await client.query(
+            `update channel_sources
+                set uploads_playlist_id = $2, handle = $3, title = $4,
+                    canonical_url = $5, thumbnail_url = $6, updated_at = now()
+              where youtube_channel_id = $1
+              returning id, youtube_channel_id as "youtubeChannelId", title,
+                        handle, canonical_url as "canonicalUrl",
+                        thumbnail_url as "thumbnailUrl",
+                        state, sync_frequency as "syncFrequency",
+                        initial_history_mode as "initialHistoryMode",
+                        initial_history_since as "initialHistorySince",
+                        last_synced_at as "lastSyncedAt",
+                        next_sync_at as "nextSyncAt"`,
+            [
+              channel.youtubeChannelId,
+              channel.uploadsPlaylistId,
+              channel.handle,
+              channel.title,
+              channel.canonicalUrl,
+              channel.thumbnailUrl,
+            ],
+          )
+        ).rows[0];
     let jobId: string | null = null;
-    if (created) {
-      const job = await client.query(
-        `insert into ingestion_jobs
-          (type, idempotency_key, scope_type, scope_id, requested_by_user_id,
-           correlation_id, checkpoint)
-         values ('channel_backfill', $1, 'channel', $2, $3::uuid, $4::uuid,
-                 $5::jsonb)
-         returning id`,
-        [
-          `channel:${record.id}:backfill`,
-          record.id,
-          options.actor.userId,
-          options.correlationId,
-          JSON.stringify({ channelSourceId: record.id }),
-        ],
-      );
-      const createdJobId = String(job.rows[0].id);
-      jobId = createdJobId;
-      const graphileId = await addTrackedGraphileJob(client, {
-        task: "channel_backfill",
-        jobId: createdJobId,
-        correlationId: options.correlationId,
-        jobKey: `hardware:channel:${record.id}:backfill`,
-        payload: { channelSourceId: record.id },
-      });
-      await client.query("update ingestion_jobs set graphile_job_id = $1 where id = $2::uuid", [graphileId, createdJobId]);
+    if (monitoringStarted) {
+      await lockChannelJobLane(client, String(record.id));
+      const durablePayload = {
+        channelSourceId: record.id,
+        historyMode,
+        ...(historySince ? { historySince: historySince.toISOString() } : {}),
+      };
+      const activeJob = await findActiveChannelJob(client, String(record.id));
+      if (activeJob) {
+        jobId = activeJob.id;
+      } else {
+        const job = await client.query(
+          `insert into ingestion_jobs
+            (type, idempotency_key, scope_type, scope_id, requested_by_user_id,
+             correlation_id, checkpoint)
+           values ('channel_backfill', $1, 'channel', $2, $3::uuid, $4::uuid,
+                   $5::jsonb)
+           returning id`,
+          [
+            `channel:${record.id}:backfill:v2`,
+            record.id,
+            options.actor.userId,
+            options.correlationId,
+            JSON.stringify(durablePayload),
+          ],
+        );
+        const createdJobId = String(job.rows[0].id);
+        jobId = createdJobId;
+        const graphileId = await addTrackedGraphileJob(client, {
+          task: "channel_backfill",
+          jobId: createdJobId,
+          correlationId: options.correlationId,
+          jobKey: `hardware:channel:${record.id}:backfill:v2`,
+          queueName: `channel:${record.id}`,
+          payload: durablePayload,
+        });
+        await client.query("update ingestion_jobs set graphile_job_id = $1 where id = $2::uuid", [graphileId, createdJobId]);
+      }
       await client.query(
         `insert into audit_events
           (actor_user_id, action, target_type, target_id, correlation_id, after_summary)
-         values ($1::uuid, 'channel.added', 'channel', $2, $3::uuid, $4::jsonb)`,
-        [options.actor.userId, record.id, options.correlationId, JSON.stringify({ youtubeChannelId: record.youtubeChannelId })],
+         values ($1::uuid, 'channel.monitoring_started', 'channel', $2, $3::uuid, $4::jsonb)`,
+        [options.actor.userId, record.id, options.correlationId, JSON.stringify({ youtubeChannelId: record.youtubeChannelId, syncFrequency: options.input.syncFrequency, historyMode, historySince: historySince?.toISOString() ?? null })],
       );
     }
     await client.query("commit");
@@ -329,18 +484,27 @@ export async function addChannel(options: {
       handle: record.handle ? String(record.handle) : null,
       canonicalUrl: record.canonicalUrl ? String(record.canonicalUrl) : null,
       thumbnailUrl: record.thumbnailUrl ? String(record.thumbnailUrl) : null,
-      status: created ? "syncing" : "healthy",
+      status: monitoringStarted
+        ? "syncing"
+        : record.state === "error"
+          ? "attention"
+          : "healthy",
       videoCount: 0,
       projectCount: 0,
-      progress: created ? 0 : null,
-      progressLabel: created ? "Backfill queued" : null,
+      progress: monitoringStarted ? 0 : null,
+      progressLabel: monitoringStarted ? "Backfill queued" : null,
       warningCount: 0,
       failureCount: 0,
       lastSyncedAt: dateText(record.lastSyncedAt),
       nextSyncAt: dateText(record.nextSyncAt),
       retryableJobId: null,
+      monitored: true,
+      paused: record.state === "paused",
+      syncFrequency: record.syncFrequency as ChannelSyncFrequency,
+      initialHistoryMode: record.initialHistoryMode as ChannelHistoryMode,
+      initialHistorySince: dateText(record.initialHistorySince),
     };
-    return { channel: responseChannel, created, jobId };
+    return { channel: responseChannel, created, monitoringStarted, jobId };
   } catch (error) {
     await client.query("rollback").catch(() => undefined);
     throw error;
@@ -368,15 +532,24 @@ export async function syncChannel(options: {
     await client.query("begin");
     const channel = await client.query("select id from channel_sources where id = $1::uuid and enabled = true for update", [options.channelId]);
     if (!channel.rows[0]) throw notFound("The channel does not exist or is disabled.");
-    const bucket = new Date().toISOString().slice(0, 13);
-    const key = `channel:${options.channelId}:poll:${bucket}`;
+    await lockChannelJobLane(client, options.channelId);
+    const activeJob = await findActiveChannelJob(client, options.channelId);
+    if (activeJob) {
+      await client.query("commit");
+      return {
+        channelId: options.channelId,
+        jobId: activeJob.id,
+        created: false,
+      };
+    }
+    const key = `channel:${options.channelId}:poll:${options.correlationId}:${randomUUID()}`;
     const job = await client.query(
       `insert into ingestion_jobs
         (type, idempotency_key, scope_type, scope_id, requested_by_user_id,
          correlation_id, checkpoint)
        values ('channel_poll', $1, 'channel', $2, $3::uuid, $4::uuid,
                $5::jsonb)
-       on conflict (idempotency_key) do nothing returning id`,
+       returning id`,
       [
         key,
         options.channelId,
@@ -385,25 +558,159 @@ export async function syncChannel(options: {
         JSON.stringify({ channelSourceId: options.channelId }),
       ],
     );
-    let jobId: string;
-    let created = true;
-    if (!job.rows[0]) {
-      const existing = await client.query("select id from ingestion_jobs where idempotency_key = $1", [key]);
-      jobId = existing.rows[0].id;
-      created = false;
-    } else {
-      jobId = job.rows[0].id;
-      const graphileId = await addTrackedGraphileJob(client, { task: "channel_poll", jobId, correlationId: options.correlationId, jobKey: `hardware:${key}`, payload: { channelSourceId: options.channelId } });
-      await client.query("update ingestion_jobs set graphile_job_id = $1 where id = $2::uuid", [graphileId, jobId]);
-      await client.query(
-        `insert into audit_events
-          (actor_user_id, action, target_type, target_id, correlation_id, after_summary)
-         values ($1::uuid, 'channel.sync_queued', 'channel', $2, $3::uuid, $4::jsonb)`,
-        [options.actor.userId, options.channelId, options.correlationId, JSON.stringify({ jobId })],
-      );
-    }
+    const jobId = String(job.rows[0].id);
+    const graphileId = await addTrackedGraphileJob(client, { task: "channel_poll", jobId, correlationId: options.correlationId, jobKey: `hardware:${key}`, queueName: `channel:${options.channelId}`, payload: { channelSourceId: options.channelId } });
+    await client.query("update ingestion_jobs set graphile_job_id = $1 where id = $2::uuid", [graphileId, jobId]);
+    await client.query(
+      `insert into audit_events
+        (actor_user_id, action, target_type, target_id, correlation_id, after_summary)
+       values ($1::uuid, 'channel.sync_queued', 'channel', $2, $3::uuid, $4::jsonb)`,
+      [options.actor.userId, options.channelId, options.correlationId, JSON.stringify({ jobId })],
+    );
     await client.query("commit");
-    return { channelId: options.channelId, jobId, created };
+    return { channelId: options.channelId, jobId, created: true };
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function updateChannelSettings(options: {
+  actor: AuthenticatedActor;
+  channelId: string;
+  input: z.infer<typeof channelUpdateSchema>;
+  correlationId: string;
+}) {
+  if (getServerConfig().mode === "demo") {
+    const channel = getDemoState().channels.find((item) => item.id === options.channelId);
+    if (!channel) throw notFound("The channel does not exist.");
+    if (options.input.paused === true) channel.status = "healthy";
+    const dueNow =
+      options.input.paused !== true &&
+      options.input.syncFrequency !== "manual";
+    return {
+      channelId: channel.id,
+      paused: options.input.paused ?? false,
+      syncFrequency: options.input.syncFrequency ?? "daily",
+      nextSyncAt: options.input.paused || options.input.syncFrequency === "manual"
+        ? null
+        : new Date().toISOString(),
+      jobId: dueNow ? `poll-${randomUUID()}` : null,
+      created: dueNow,
+    };
+  }
+
+  z.string().uuid().parse(options.channelId);
+  const client = await getPool().connect();
+  try {
+    await client.query("begin");
+    const updated = await client.query(
+      `update channel_sources
+          set sync_frequency = coalesce($2::channel_sync_frequency, sync_frequency),
+              state = case
+                when $3::boolean is true then 'paused'::source_state
+                when $3::boolean is false then 'active'::source_state
+                else state
+              end,
+              next_sync_at = case
+                when $3::boolean is true then null
+                when $3::boolean is null and state = 'paused' then null
+                when coalesce($2::channel_sync_frequency, sync_frequency) = 'manual' then null
+                when $3::boolean is false or $2::channel_sync_frequency is not null then
+                  case coalesce($2::channel_sync_frequency, sync_frequency)
+                    when 'weekly' then greatest(
+                      coalesce(last_synced_at + interval '7 days', now()),
+                      now()
+                    )
+                    else greatest(
+                      coalesce(last_synced_at + interval '1 day', now()),
+                      now()
+                    )
+                  end
+                else next_sync_at
+              end,
+              updated_at = now()
+        where id = $1::uuid and enabled = true
+        returning id, state = 'paused' as paused,
+                  sync_frequency as "syncFrequency",
+                  next_sync_at as "nextSyncAt",
+                  next_sync_at is not null and next_sync_at <= now() as "dueNow"`,
+      [
+        options.channelId,
+        options.input.syncFrequency ?? null,
+        options.input.paused ?? null,
+      ],
+    );
+    const row = updated.rows[0];
+    if (!row) throw notFound("The monitored channel does not exist.");
+    let jobId: string | null = null;
+    let created = false;
+    if (!row.paused && row.syncFrequency !== "manual" && row.dueNow) {
+      await lockChannelJobLane(client, options.channelId);
+      const activeJob = await findActiveChannelJob(client, options.channelId);
+      if (activeJob) {
+        jobId = activeJob.id;
+      } else {
+        const key = `channel:${options.channelId}:settings-due:${options.correlationId}:${randomUUID()}`;
+        const inserted = await client.query(
+          `insert into ingestion_jobs
+            (type, idempotency_key, scope_type, scope_id,
+             requested_by_user_id, correlation_id, checkpoint)
+           values ('channel_poll', $1, 'channel', $2, $3::uuid, $4::uuid,
+                   $5::jsonb)
+           returning id`,
+          [
+            key,
+            options.channelId,
+            options.actor.userId,
+            options.correlationId,
+            JSON.stringify({ channelSourceId: options.channelId }),
+          ],
+        );
+        jobId = String(inserted.rows[0].id);
+        const graphileId = await addTrackedGraphileJob(client, {
+          task: "channel_poll",
+          jobId,
+          correlationId: options.correlationId,
+          jobKey: `hardware:${key}`,
+          queueName: `channel:${options.channelId}`,
+          payload: { channelSourceId: options.channelId },
+        });
+        await client.query(
+          "update ingestion_jobs set graphile_job_id = $1 where id = $2::uuid",
+          [graphileId, jobId],
+        );
+        created = true;
+      }
+    }
+    await client.query(
+      `insert into audit_events
+        (actor_user_id, action, target_type, target_id, correlation_id, after_summary)
+       values ($1::uuid, 'channel.settings_updated', 'channel', $2, $3::uuid, $4::jsonb)`,
+      [
+        options.actor.userId,
+        options.channelId,
+        options.correlationId,
+        JSON.stringify({
+          paused: Boolean(row.paused),
+          syncFrequency: row.syncFrequency,
+          nextSyncAt: dateText(row.nextSyncAt),
+          jobId,
+          created,
+        }),
+      ],
+    );
+    await client.query("commit");
+    return {
+      channelId: String(row.id),
+      paused: Boolean(row.paused),
+      syncFrequency: row.syncFrequency as ChannelSyncFrequency,
+      nextSyncAt: dateText(row.nextSyncAt),
+      jobId,
+      created,
+    };
   } catch (error) {
     await client.query("rollback").catch(() => undefined);
     throw error;

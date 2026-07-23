@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import type { ParsedProjectMention } from "../../lib/ingestion";
+import { parseYouTubeDescription, type ParsedProjectMention } from "../../lib/ingestion";
 import type { GitHubRepositoryMetadata } from "../../lib/integrations";
 import { PgIngestionStore } from "../../worker/implementations";
 
@@ -60,6 +60,174 @@ function githubMention(url: string, rawUrl = url): ParsedProjectMention {
 }
 
 describe("PgIngestionStore", () => {
+  it("marks enumeration complete without finalizing the channel before child roll-up", async () => {
+    const fake = fakePool();
+    const store = new PgIngestionStore(fake.pool);
+    const parentJobId = "11111111-1111-4111-8111-111111111111";
+
+    await store.completeChannelSync(
+      CHANNEL_ID,
+      { lastSeenVideoId: "KITOm0HitpY" },
+      parentJobId,
+    );
+
+    expect(fake.queries).toHaveLength(1);
+    expect(fake.queries[0].text).toContain("'enumerationComplete', true");
+    expect(fake.queries[0].text).not.toContain("last_synced_at = now()");
+    expect(fake.queries[0].values).toEqual([
+      CHANNEL_ID,
+      JSON.stringify({ lastSeenVideoId: "KITOm0HitpY" }),
+      parentJobId,
+    ]);
+  });
+
+  it("keeps a one-off video's parent channel unmonitored", async () => {
+    const fake = fakePool((text) => text.includes("returning id")
+      ? { rows: [{ id: CHANNEL_ID, youtube_channel_id: "UC_x5XG1OV2P6uZZ5FSM9Ttw", uploads_playlist_id: "UU_x5XG1OV2P6uZZ5FSM9Ttw", checkpoint: {} }] }
+      : { rows: [] });
+    const store = new PgIngestionStore(fake.pool);
+
+    await store.upsertChannel({
+      id: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+      uploadsPlaylistId: "UU_x5XG1OV2P6uZZ5FSM9Ttw",
+      title: "One-off source",
+      canonicalUrl: "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw",
+    }, { monitoringEnabled: false });
+
+    expect(fake.queries[0].values?.at(-1)).toBe(false);
+    expect(fake.queries[0].text).toContain("channel_sources.enabled or excluded.enabled");
+  });
+
+  it("creates a crash-recoverable Daily latest-25 channel subscription", async () => {
+    const subscriptionJobId = "11111111-1111-4111-8111-111111111111";
+    const fake = fakePool((text) => {
+      if (text.includes("select id, enabled from channel_sources")) {
+        return { rows: [] };
+      }
+      if (text.includes("insert into channel_sources")) {
+        return {
+          rows: [{
+            id: CHANNEL_ID,
+            youtube_channel_id: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+            uploads_playlist_id: "UU_x5XG1OV2P6uZZ5FSM9Ttw",
+            checkpoint: {
+              initialBackfillPending: true,
+              subscriptionJobId,
+            },
+          }],
+        };
+      }
+      if (text.includes("updated_channel as")) {
+        return { rows: [{ id: CHANNEL_ID }] };
+      }
+      return { rows: [] };
+    });
+    const store = new PgIngestionStore(fake.pool);
+
+    const subscription = await store.ensureChannelSubscription({
+      id: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+      uploadsPlaylistId: "UU_x5XG1OV2P6uZZ5FSM9Ttw",
+      title: "Channel",
+      canonicalUrl: "https://www.youtube.com/@channel",
+    }, {
+      subscriptionJobId,
+      requestedByUserId: "77777777-7777-4777-8777-777777777777",
+    });
+
+    expect(subscription).toMatchObject({
+      backfillPending: true,
+      subscriptionJobId,
+      channel: { id: CHANNEL_ID },
+    });
+    const insert = fake.queries.find(({ text }) =>
+      text.includes("insert into channel_sources"),
+    );
+    expect(insert?.text).toContain("'daily', 'latest_25'");
+    expect(insert?.values?.[7]).toBe(JSON.stringify({
+      initialBackfillPending: true,
+      subscriptionJobId,
+    }));
+
+    await expect(store.confirmChannelSubscriptionBackfill(
+      CHANNEL_ID,
+      subscriptionJobId,
+      subscriptionJobId,
+    )).resolves.toBe(true);
+    const confirmation = fake.queries.at(-1);
+    expect(confirmation?.text).toContain("type = 'channel_backfill'");
+    expect(confirmation?.text).toContain("update import_batch_items as item");
+    expect(confirmation?.text).toContain("item.ingestion_job_id in ($2::uuid, $3::uuid)");
+    expect(confirmation?.text).toContain("count(*) from relinked_batch_item");
+    expect(confirmation?.text).toContain("- 'initialBackfillPending'");
+    expect(confirmation?.values).toEqual([
+      CHANNEL_ID,
+      subscriptionJobId,
+      subscriptionJobId,
+    ]);
+  });
+
+  it("preserves settings when a bulk channel row resolves to an existing monitor", async () => {
+    const fake = fakePool((text) => {
+      if (text.includes("select id, enabled from channel_sources")) {
+        return { rows: [{ id: CHANNEL_ID, enabled: true }] };
+      }
+      if (text.includes("update channel_sources")) {
+        return {
+          rows: [{
+            id: CHANNEL_ID,
+            youtube_channel_id: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+            uploads_playlist_id: "UU_x5XG1OV2P6uZZ5FSM9Ttw",
+            checkpoint: {},
+          }],
+        };
+      }
+      return { rows: [] };
+    });
+    const store = new PgIngestionStore(fake.pool);
+
+    await expect(store.ensureChannelSubscription({
+      id: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+      uploadsPlaylistId: "UU_x5XG1OV2P6uZZ5FSM9Ttw",
+      title: "Updated metadata",
+      canonicalUrl: "https://www.youtube.com/@channel",
+    }, {
+      subscriptionJobId: "11111111-1111-4111-8111-111111111111",
+    })).resolves.toMatchObject({ backfillPending: false });
+
+    const update = fake.queries.find(({ text }) =>
+      text.includes("update channel_sources"),
+    );
+    expect(update?.text).not.toContain("sync_frequency =");
+    expect(update?.text).not.toContain("enabled = true");
+  });
+
+  it("loads stored official metadata with its provider channel for quota-free child parsing", async () => {
+    const fake = fakePool((text) => text.includes("from video_sources v")
+      ? {
+          rows: [{
+            id: VIDEO_ID,
+            channel_id: CHANNEL_ID,
+            youtube_video_id: "KITOm0HitpY",
+            youtube_channel_id: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+            title: "Projects",
+            description: "0:00 Tool https://tool.example",
+            duration_seconds: 60,
+            metadata_ready: true,
+          }],
+        }
+      : { rows: [] });
+    const store = new PgIngestionStore(fake.pool);
+
+    await expect(store.getVideo(VIDEO_ID)).resolves.toEqual(expect.objectContaining({
+      id: VIDEO_ID,
+      youtubeChannelId: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+      description: "0:00 Tool https://tool.example",
+      metadataReady: true,
+    }));
+    expect(fake.queries[0].text).toContain("join channel_sources c");
+    expect(fake.queries[0].text).toContain("description_fetched_at is not null");
+  });
+
   it("purges policy-restricted video and raw description fields atomically", async () => {
     const fake = fakePool((text) =>
       text.includes("select v.availability")
@@ -74,17 +242,67 @@ describe("PgIngestionStore", () => {
       expect.stringContaining("select v.availability"),
       expect.stringContaining("update video_sources set title = null, description = null"),
       expect.stringContaining("update sightings set raw_segment = null"),
+      expect.stringContaining("update source_reviews"),
       expect.stringContaining("'youtube_source.unavailable'"),
       "commit",
     ]);
+    expect(fake.queries[1].text).toContain("from source_reviews review");
     expect(fake.queries[2].values).toEqual([VIDEO_ID]);
+    expect(fake.queries[2].text).toContain("unavailable_recheck_at = now() + interval '30 days'");
     expect(fake.queries[3].values).toEqual([VIDEO_ID]);
-    expect(fake.queries[4].values).toEqual([
+    expect(fake.queries[4].values).toEqual([VIDEO_ID]);
+    expect(fake.queries[4].text).toContain("rejected_rows = '[]'::jsonb");
+    expect(fake.queries[4].text).toContain("ignored_links = '[]'::jsonb");
+    expect(fake.queries[4].text).toContain("diagnostics = '[]'::jsonb");
+    expect(fake.queries[4].text).toContain("version = version + 1");
+    expect(fake.queries[5].values).toEqual([
       VIDEO_ID,
       CORRELATION_ID,
       JSON.stringify({ availability: "available", retainedSourceData: true }),
       JSON.stringify({ availability: "unavailable", retainedSourceData: false }),
     ]);
+  });
+
+  it("records zero-result parser output for source review without storing a second copy of the description", async () => {
+    const fake = fakePool();
+    const store = new PgIngestionStore(fake.pool);
+    const parsed = parseYouTubeDescription({
+      videoId: "KITOm0HitpY",
+      description: "",
+    });
+
+    await store.recordSourceReview(VIDEO_ID, "11111111-1111-4111-8111-111111111111", parsed);
+
+    const review = fake.queries.find(({ text }) => text.includes("insert into source_reviews"));
+    expect(review?.text).toContain("on conflict (video_id) do update");
+    expect(review?.text).toContain("source_reviews.state = 'ignored'");
+    expect(review?.text).toContain("then source_reviews.resolution_note");
+    expect(review?.values?.[4]).toBe(0);
+    expect(review?.values?.[5]).toBe(1);
+    expect(review?.values?.[6]).toBe(0);
+    expect(String(review?.values?.[9])).toContain("EMPTY_DESCRIPTION");
+  });
+
+  it("stores parser errors separately from warnings", async () => {
+    const fake = fakePool();
+    const store = new PgIngestionStore(fake.pool);
+    const parsed = parseYouTubeDescription({
+      videoId: "KITOm0HitpY",
+      description: `00:01 Tool https://example.com/${"x".repeat(100_000)}`,
+    });
+
+    await store.recordSourceReview(
+      VIDEO_ID,
+      "11111111-1111-4111-8111-111111111111",
+      parsed,
+    );
+
+    const review = fake.queries.find(({ text }) =>
+      text.includes("insert into source_reviews"),
+    );
+    expect(review?.values?.[5]).toBe(0);
+    expect(review?.values?.[6]).toBe(1);
+    expect(String(review?.values?.[9])).toContain("DESCRIPTION_TOO_LARGE");
   });
 
   it("uses one canonical GitHub identity for URL variants while preserving source provenance", async () => {

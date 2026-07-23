@@ -1,6 +1,6 @@
 # Hardware schedules are expressed in UTC and use stable identifiers.
-# Six-hour channel polling with a small backfill window after maintenance.
-0 */6 * * * schedule_channel_polls ?id=channelPollsV1&fill=7h&max=3
+# Hourly due-source sweep. Each channel's stored policy is Manual, Daily, or Weekly.
+0 * * * * schedule_channel_polls ?id=channelPollsV2&fill=2h&max=3
 
 # Daily batches enforce YouTube's rolling revalidation requirement.
 15 2 * * * schedule_youtube_revalidation ?id=youtubeRevalidationV1&fill=25h&max=3

@@ -28,6 +28,35 @@ export const videoAvailability = pgEnum("video_availability", [
   "unavailable",
   "deleted",
 ]);
+export const channelSyncFrequency = pgEnum("channel_sync_frequency", [
+  "manual",
+  "daily",
+  "weekly",
+]);
+export const channelHistoryMode = pgEnum("channel_history_mode", [
+  "latest_10",
+  "latest_25",
+  "latest_50",
+  "since",
+  "all",
+]);
+export const importBatchState = pgEnum("import_batch_state", [
+  "processing",
+  "queued",
+  "succeeded",
+  "partial",
+  "failed",
+]);
+export const importBatchItemState = pgEnum("import_batch_item_state", [
+  "queued",
+  "duplicate",
+  "invalid",
+]);
+export const sourceReviewState = pgEnum("source_review_state", [
+  "open",
+  "resolved",
+  "ignored",
+]);
 export const projectState = pgEnum("project_state", [
   "active",
   "archived",
@@ -61,6 +90,7 @@ export const collectionVisibility = pgEnum("collection_visibility", [
   "workspace",
 ]);
 export const ingestionJobType = pgEnum("ingestion_job_type", [
+  "channel_resolve",
   "channel_backfill",
   "channel_poll",
   "video_ingest",
@@ -92,7 +122,6 @@ export const users = pgTable(
   "users",
   {
     id: uuid("id").defaultRandom().primaryKey(),
-    clerkUserId: varchar("clerk_user_id", { length: 128 }).notNull(),
     email: varchar("email", { length: 320 }),
     displayName: varchar("display_name", { length: 160 }),
     avatarUrl: text("avatar_url"),
@@ -103,7 +132,6 @@ export const users = pgTable(
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
   },
   (table) => [
-    uniqueIndex("users_clerk_user_id_uidx").on(table.clerkUserId),
     index("users_role_idx").on(table.role),
   ],
 );
@@ -119,7 +147,16 @@ export const channelSources = pgTable(
     canonicalUrl: text("canonical_url").notNull(),
     thumbnailUrl: text("thumbnail_url"),
     state: sourceState("state").default("active").notNull(),
-    enabled: boolean("enabled").default(true).notNull(),
+    enabled: boolean("enabled").default(false).notNull(),
+    syncFrequency: channelSyncFrequency("sync_frequency")
+      .default("daily")
+      .notNull(),
+    initialHistoryMode: channelHistoryMode("initial_history_mode")
+      .default("latest_25")
+      .notNull(),
+    initialHistorySince: timestamp("initial_history_since", {
+      withTimezone: true,
+    }),
     checkpoint: jsonb("checkpoint")
       .$type<Record<string, unknown>>()
       .default(sql`'{}'::jsonb`)
@@ -167,6 +204,9 @@ export const videoSources = pgTable(
     youtubeDataExpiresAt: timestamp("youtube_data_expires_at", {
       withTimezone: true,
     }),
+    unavailableRecheckAt: timestamp("unavailable_recheck_at", {
+      withTimezone: true,
+    }),
     lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -180,6 +220,7 @@ export const videoSources = pgTable(
     index("video_sources_revalidation_idx").on(
       table.availability,
       table.youtubeDataExpiresAt,
+      table.unavailableRecheckAt,
     ),
     check(
       "video_sources_duration_nonnegative",
@@ -481,7 +522,9 @@ export const projectNotes = pgTable(
     projectId: uuid("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
-    body: varchar("body", { length: 10000 }).default("").notNull(),
+    // The UI still limits new edits to 10,000 characters. Unbounded storage
+    // lets the local-owner migration merge all legacy notes without truncation.
+    body: text("body").default("").notNull(),
     version: integer("version").default(1).notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -579,6 +622,114 @@ export const ingestionEvents = pgTable(
     createdAt: createdAt(),
   },
   (table) => [index("ingestion_events_job_created_idx").on(table.jobId, table.createdAt)],
+);
+
+export const importBatches = pgTable(
+  "import_batches",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    idempotencyKey: varchar("idempotency_key", { length: 300 }).notNull(),
+    requestedByUserId: uuid("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    correlationId: uuid("correlation_id").defaultRandom().notNull(),
+    state: importBatchState("state").default("processing").notNull(),
+    totalItems: integer("total_items").notNull(),
+    queuedItems: integer("queued_items").default(0).notNull(),
+    duplicateItems: integer("duplicate_items").default(0).notNull(),
+    invalidItems: integer("invalid_items").default(0).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("import_batches_idempotency_uidx").on(table.idempotencyKey),
+    index("import_batches_created_idx").on(table.createdAt),
+    check(
+      "import_batches_counts_valid",
+      sql`${table.totalItems} > 0 and ${table.queuedItems} >= 0 and ${table.duplicateItems} >= 0 and ${table.invalidItems} >= 0 and ${table.queuedItems} + ${table.duplicateItems} + ${table.invalidItems} <= ${table.totalItems}`,
+    ),
+  ],
+);
+
+export const importBatchItems = pgTable(
+  "import_batch_items",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    batchId: uuid("batch_id")
+      .notNull()
+      .references(() => importBatches.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    kind: varchar("kind", { length: 40 }),
+    originalUrl: text("original_url"),
+    normalizedUrl: text("normalized_url"),
+    state: importBatchItemState("state").notNull(),
+    validationCode: varchar("validation_code", { length: 80 }),
+    validationSummary: varchar("validation_summary", { length: 500 }),
+    duplicateOfItemId: uuid("duplicate_of_item_id").references(
+      (): AnyPgColumn => importBatchItems.id,
+      { onDelete: "set null" },
+    ),
+    ingestionJobId: uuid("ingestion_job_id").references(() => ingestionJobs.id, {
+      onDelete: "set null",
+    }),
+    retryCount: integer("retry_count").default(0).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("import_batch_items_ordinal_uidx").on(table.batchId, table.ordinal),
+    index("import_batch_items_job_idx").on(table.ingestionJobId),
+    check("import_batch_items_ordinal_positive", sql`${table.ordinal} > 0`),
+    check("import_batch_items_retry_nonnegative", sql`${table.retryCount} >= 0`),
+  ],
+);
+
+export const sourceReviews = pgTable(
+  "source_reviews",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    videoId: uuid("video_id")
+      .notNull()
+      .references(() => videoSources.id, { onDelete: "cascade" }),
+    ingestionJobId: uuid("ingestion_job_id").references(() => ingestionJobs.id, {
+      onDelete: "set null",
+    }),
+    state: sourceReviewState("state").default("open").notNull(),
+    parserVersion: varchar("parser_version", { length: 32 }).notNull(),
+    issueFingerprint: varchar("issue_fingerprint", { length: 64 }).notNull(),
+    version: integer("version").default(1).notNull(),
+    mentionCount: integer("mention_count").default(0).notNull(),
+    warningCount: integer("warning_count").default(0).notNull(),
+    errorCount: integer("error_count").default(0).notNull(),
+    rejectedRows: jsonb("rejected_rows")
+      .$type<Array<Record<string, unknown>>>()
+      .default(sql`'[]'::jsonb`)
+      .notNull(),
+    ignoredLinks: jsonb("ignored_links")
+      .$type<Array<Record<string, unknown>>>()
+      .default(sql`'[]'::jsonb`)
+      .notNull(),
+    diagnostics: jsonb("diagnostics")
+      .$type<Array<Record<string, unknown>>>()
+      .default(sql`'[]'::jsonb`)
+      .notNull(),
+    resolvedByUserId: uuid("resolved_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    resolutionNote: text("resolution_note"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("source_reviews_video_uidx").on(table.videoId),
+    index("source_reviews_queue_idx").on(table.state, table.updatedAt),
+    check(
+      "source_reviews_counts_nonnegative",
+      sql`${table.mentionCount} >= 0 and ${table.warningCount} >= 0 and ${table.errorCount} >= 0`,
+    ),
+    check("source_reviews_version_positive", sql`${table.version} > 0`),
+  ],
 );
 
 export const auditEvents = pgTable(
