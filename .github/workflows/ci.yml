@@ -54,6 +54,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run desktop:check
       - run: npm test
       - run: npm run test:bdd
       - run: npm run db:check
@@ -62,8 +63,12 @@ jobs:
       - run: npm run db:api-smoke
       - run: npm run db:mutation-smoke
       - run: npm run build
+      - run: npm run desktop:compile
+      - run: npm run desktop:runtime
+      - run: npm run desktop:icons
+      - run: npm run desktop:scan
       - run: npm run security:audit
-      - run: shellcheck deploy/*.sh
+      - run: shellcheck deploy/*.sh scripts/desktop/*.sh
       - run: docker compose --profile tools --env-file .env.example config --quiet
       - run: >-
           docker build

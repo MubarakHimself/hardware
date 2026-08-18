@@ -14,6 +14,7 @@ import { conflict, notFound } from "./errors";
 import { addTrackedGraphileJob } from "./job-queue";
 import { findActiveChannelJob, lockChannelJobLane } from "./channel-jobs";
 import type { DemoStoredJob } from "./demo-store";
+import { requireTaskProviderConfigured } from "./providers";
 
 export interface JobDto {
   id: string;
@@ -434,6 +435,7 @@ export async function retryJob(options: {
     );
     const job = result.rows[0];
     if (!job) throw notFound("The ingestion job does not exist.");
+    requireTaskProviderConfigured(job.type as IngestionJobType);
     if (job.state === "queued" || job.state === "running") {
       await client.query("commit");
       return { id: job.id, state: job.state, created: false };

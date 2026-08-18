@@ -26,7 +26,8 @@ export type ServerConfig =
       localOwnerId: string;
       localOwnerName: string;
       healthcheckToken: string;
-      youtubeApiKey: string;
+      desktopSessionToken?: string;
+      youtubeApiKey?: string;
       githubToken?: string;
     });
 
@@ -121,7 +122,20 @@ export function getServerConfig(
         .default(DEFAULT_LOCAL_OWNER_ID),
       LOCAL_OWNER_NAME: z.string().trim().min(1).max(160).default("Local owner"),
       HEALTHCHECK_TOKEN: healthcheckToken,
-      YOUTUBE_API_KEY: z.string().trim().min(20).max(512),
+      DESKTOP_SESSION_TOKEN: z.preprocess(
+        (value) =>
+          typeof value === "string" && value.trim() === ""
+            ? undefined
+            : value,
+        healthcheckToken.optional(),
+      ),
+      YOUTUBE_API_KEY: z.preprocess(
+        (value) =>
+          typeof value === "string" && value.trim() === ""
+            ? undefined
+            : value,
+        z.string().trim().min(20).max(512).optional(),
+      ),
       GITHUB_TOKEN: z.preprocess(
         (value) =>
           typeof value === "string" && value.trim() === ""
@@ -130,7 +144,11 @@ export function getServerConfig(
         z.string().trim().min(1).max(512).optional(),
       ),
     })
-    .safeParse(environment);
+    .safeParse({
+      ...environment,
+      HEALTHCHECK_TOKEN:
+        environment.HEALTHCHECK_TOKEN ?? environment.DESKTOP_SESSION_TOKEN,
+    });
 
   if (!configured.success) {
     throw new ServerConfigurationError();
@@ -143,6 +161,7 @@ export function getServerConfig(
     localOwnerName: configured.data.LOCAL_OWNER_NAME,
     appOrigin,
     healthcheckToken: configured.data.HEALTHCHECK_TOKEN,
+    desktopSessionToken: configured.data.DESKTOP_SESSION_TOKEN,
     youtubeApiKey: configured.data.YOUTUBE_API_KEY,
     githubToken: configured.data.GITHUB_TOKEN,
     releaseSha: common.data.RELEASE_SHA,

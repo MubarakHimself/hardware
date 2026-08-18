@@ -18,6 +18,10 @@ import { getDemoState } from "./demo-store";
 import { ApiError, notFound } from "./errors";
 import { addTrackedGraphileJob } from "./job-queue";
 import { findActiveChannelJob, lockChannelJobLane } from "./channel-jobs";
+import {
+  isProviderConfigured,
+  requireProviderConfigured,
+} from "./providers";
 
 const initialHistorySchema = z.union([
   z.object({ mode: z.enum(["latest_10", "latest_25", "latest_50", "all"]) }).strict(),
@@ -136,9 +140,10 @@ function lookupFromInput(value: string): { id?: string; handle?: string } {
 async function resolveYouTubeChannel(value: string) {
   const config = getServerConfig();
   if (config.mode !== "local") throw new Error("Persistent channel resolution called in demo mode.");
+  requireProviderConfigured("youtube");
   try {
     const channel = await new YouTubeClient({
-      apiKey: config.youtubeApiKey,
+      apiKey: config.youtubeApiKey!,
       timeoutMs: 10_000,
     }).resolveChannel(value);
     return {
@@ -526,6 +531,7 @@ export async function syncChannel(options: {
     channel.progressLabel = "Sync queued";
     return { channelId: channel.id, jobId: `poll-${randomUUID()}`, created: true };
   }
+  requireProviderConfigured("youtube");
   z.string().uuid().parse(options.channelId);
   const client = await getPool().connect();
   try {
@@ -647,7 +653,12 @@ export async function updateChannelSettings(options: {
     if (!row) throw notFound("The monitored channel does not exist.");
     let jobId: string | null = null;
     let created = false;
-    if (!row.paused && row.syncFrequency !== "manual" && row.dueNow) {
+    if (
+      !row.paused &&
+      row.syncFrequency !== "manual" &&
+      row.dueNow &&
+      isProviderConfigured("youtube")
+    ) {
       await lockChannelJobLane(client, options.channelId);
       const activeJob = await findActiveChannelJob(client, options.channelId);
       if (activeJob) {

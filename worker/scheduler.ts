@@ -82,6 +82,12 @@ function timeBucket(date: Date, bucketHours: number): string {
   return new Date(Math.floor(date.getTime() / bucketMs) * bucketMs).toISOString();
 }
 
+export function hasYouTubeCredential(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  return Boolean(environment.YOUTUBE_API_KEY?.trim());
+}
+
 export async function enqueueTrackedJob(
   task: TaskName,
   scope: Scope,
@@ -195,7 +201,17 @@ export async function enqueueTrackedJob(
 
 export async function scheduleOverdueChannelPolls(
   pool: SchedulerPool = getPool(),
+  options: { youtubeConfigured?: boolean } = {},
 ): Promise<number> {
+  const youtubeConfigured =
+    options.youtubeConfigured ?? hasYouTubeCredential();
+  if (!youtubeConfigured) {
+    logger.info({
+      event: "channel_polls_skipped",
+      reason: "youtube_provider_not_configured",
+    });
+    return 0;
+  }
   const result = await pool.query<{ id: string }>(
     `
       select id
@@ -237,6 +253,13 @@ export const scheduleChannelPolls: Task = async () => {
 };
 
 export const scheduleYouTubeRevalidation: Task = async () => {
+  if (!hasYouTubeCredential()) {
+    logger.info({
+      event: "youtube_revalidation_skipped",
+      reason: "youtube_provider_not_configured",
+    });
+    return;
+  }
   const result = await getPool().query<{ id: string }>(
     `
       with due as (

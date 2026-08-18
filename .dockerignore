@@ -2,10 +2,17 @@
 .github
 .next
 .wrangler
+.desktop-cache
+build/desktop
+build/runtime
+build/icons/*.ico
+build/icons/*.png
 coverage
 dist-db
 dist-worker
 node_modules
+release
+vendor/postgres
 playwright-report
 test-results
 .hardware

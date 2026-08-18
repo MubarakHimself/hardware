@@ -4,10 +4,12 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import { getHardwareDesktopBridge } from "@/lib/desktop/contracts";
 
 export type ThemePreference = "light" | "dark" | "system";
 type ResolvedTheme = "light" | "dark";
@@ -107,10 +109,30 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     getServerSnapshot,
   );
 
+  useEffect(() => {
+    const bridge = getHardwareDesktopBridge();
+    if (!bridge) return;
+    let active = true;
+    void bridge
+      .getDesktopPreferences()
+      .then((preferences) => {
+        if (!active) return;
+        window.localStorage.setItem(THEME_STORAGE_KEY, preferences.theme);
+        publish(preferences.theme);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const setPreference = useCallback(
     (nextPreference: ThemePreference) => {
       window.localStorage.setItem(THEME_STORAGE_KEY, nextPreference);
       publish(nextPreference);
+      void getHardwareDesktopBridge()
+        ?.setDesktopPreferences({ theme: nextPreference })
+        .catch(() => undefined);
     },
     [],
   );

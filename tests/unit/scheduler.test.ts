@@ -185,7 +185,9 @@ describe("personal channel scheduling", () => {
       connect: vi.fn(async () => client),
     } as unknown as Pool;
 
-    await expect(scheduleOverdueChannelPolls(pool)).resolves.toBe(1);
+    await expect(
+      scheduleOverdueChannelPolls(pool, { youtubeConfigured: true }),
+    ).resolves.toBe(1);
 
     const selection = calls.find(({ text }) => text.includes("from channel_sources"));
     expect(selection?.text).toContain("state <> 'paused'");
@@ -194,6 +196,18 @@ describe("personal channel scheduling", () => {
     expect(selection?.text).not.toContain("state = 'active'");
     const graphile = calls.find(({ text }) => text.includes("graphile_worker.add_job"));
     expect(graphile?.values?.[2]).toBe(`channel:${PROJECT_ID}`);
+  });
+
+  it("does not inspect or enqueue YouTube schedules without a credential", async () => {
+    const query = vi.fn();
+    const connect = vi.fn();
+    const pool = { query, connect } as unknown as Pool;
+
+    await expect(
+      scheduleOverdueChannelPolls(pool, { youtubeConfigured: false }),
+    ).resolves.toBe(0);
+    expect(query).not.toHaveBeenCalled();
+    expect(connect).not.toHaveBeenCalled();
   });
 
   it("interleaves due available and unavailable video lanes to prevent starvation", () => {

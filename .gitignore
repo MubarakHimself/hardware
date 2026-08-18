@@ -42,7 +42,21 @@ next-env.d.ts
 /dist-db/
 /dist-worker/
 /.wrangler/
+/build/desktop/
+/build/runtime/
+/build/icons/*.ico
+/build/icons/*.png
+/release/
+/vendor/postgres/
+/.desktop-cache/
 
 # personal local runtime
 /.hardware/
 /backups/
+
+# sssf runtime
+adws/adw_data/sessions/
+adws/adw_data/sssf.db*
+.env
+__pycache__/
+*.pyc

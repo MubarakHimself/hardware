@@ -32,6 +32,7 @@ import {
   type ReactNode,
 } from "react";
 import { useTheme } from "@/components/hardware/theme-provider";
+import { DesktopOnboarding } from "@/components/hardware/desktop-onboarding";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1203,6 +1204,7 @@ export function HardwareShell({
             router.push("/activity");
           }}
         />
+        <DesktopOnboarding />
       </div>
     </>
   );

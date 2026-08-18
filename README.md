@@ -10,6 +10,20 @@ Hardware stores metadata, descriptions, links, notes, and repository facts. It
 does not download videos, request captions, clone repositories, or send catalog
 content to an AI provider.
 
+## Desktop Alpha
+
+Hardware is being packaged as a self-contained Electron desktop application.
+The Windows `0.2.0-alpha.1` release bundles its own application-managed
+PostgreSQL 17.10 runtime and requires no Docker, Node.js, Git, PowerShell
+launcher, or separately installed database. Ubuntu 24.04 x64 packaging follows
+in `0.2.0-alpha.2`.
+
+Build, provenance, installer, ZIP, `.deb`, AppImage, SBOM, checksum, and
+prerelease procedures are documented in
+[docs/DESKTOP_DISTRIBUTION.md](docs/DESKTOP_DISTRIBUTION.md). The Docker
+workflow below remains available during alpha development and regression
+testing, but is not part of the installed desktop application.
+
 ## Personal Local v1.1
 
 - Desktop-browser workspace at `http://127.0.0.1:3000`.

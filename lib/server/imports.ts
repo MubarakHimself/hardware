@@ -8,6 +8,7 @@ import { parseImportRequest } from "../validation/imports";
 import { getPool } from "../../db/index";
 import { getServerConfig } from "./config";
 import { getDemoState, type DemoQueuedImport } from "./demo-store";
+import { requireImportProviderConfigured } from "./providers";
 
 const importTask: Record<ImportCommand["kind"], IngestionJobType> = {
   youtube_video: "video_ingest",
@@ -64,6 +65,7 @@ export async function queueImportWithClient(
   // queue boundary so a typed-but-untrusted runtime value cannot bypass URL
   // policy and reach persistence or provider work.
   const input = parseImportRequest(options.input);
+  requireImportProviderConfigured(input.kind);
   const key = idempotencyKey({
     actorId: options.actor.userId,
     input,

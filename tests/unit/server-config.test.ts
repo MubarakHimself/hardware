@@ -30,6 +30,31 @@ describe("server configuration", () => {
     expect(config).not.toHaveProperty("clerkSecretKey");
   });
 
+  it("allows a local library to start before YouTube is configured", () => {
+    const config = getServerConfig({
+      ...localEnvironment,
+      YOUTUBE_API_KEY: undefined,
+    });
+
+    expect(config).toMatchObject({ mode: "local" });
+    expect(config).toHaveProperty("youtubeApiKey", undefined);
+  });
+
+  it("accepts a per-launch desktop token as the protected probe token", () => {
+    const token = "desktop-session-token-7f3c9a2b5d8e1f4a";
+    const config = getServerConfig({
+      ...localEnvironment,
+      HEALTHCHECK_TOKEN: undefined,
+      DESKTOP_SESSION_TOKEN: token,
+    });
+
+    expect(config).toMatchObject({
+      mode: "local",
+      desktopSessionToken: token,
+      healthcheckToken: token,
+    });
+  });
+
   it("rejects every alternate local owner ID", () => {
     expect(() =>
       getServerConfig({

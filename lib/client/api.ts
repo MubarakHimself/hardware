@@ -11,6 +11,7 @@ import {
   type UiProject,
   type UiRepositoryCandidate,
 } from "./contracts";
+import type { ProviderStatus } from "../desktop/contracts";
 
 interface ApiEnvelope<T> {
   data: T;
@@ -56,6 +57,11 @@ export function errorMessage(error: unknown): string {
     return error.correlationId ? `${error.message} Reference ${error.correlationId}.` : error.message;
   }
   return error instanceof Error ? error.message : "The request could not be completed.";
+}
+
+export async function getProviderStatuses(): Promise<ProviderStatus[]> {
+  const result = await request<ProviderStatus[]>("/api/integrations/status");
+  return Array.isArray(result.data) ? result.data : [];
 }
 
 export async function listProjects(search: URLSearchParams): Promise<{

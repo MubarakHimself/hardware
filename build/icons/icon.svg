@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">Hardware linked-card H mark</title>
+  <defs>
+    <linearGradient id="surface" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B1E24"/>
+      <stop offset="1" stop-color="#0D0F13"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="276" y1="230" x2="756" y2="806" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD166"/>
+      <stop offset=".48" stop-color="#FFB020"/>
+      <stop offset="1" stop-color="#E98A00"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="976" height="976" rx="224" fill="url(#surface)"/>
+  <rect x="40" y="40" width="944" height="944" rx="208" fill="none" stroke="#343944" stroke-width="16"/>
+  <path d="M304 262v500M720 262v500M304 512h416" fill="none" stroke="url(#amber)" stroke-width="104" stroke-linecap="round"/>
+  <rect x="208" y="166" width="192" height="192" rx="64" fill="#15181E" stroke="#FFD166" stroke-width="28"/>
+  <rect x="624" y="666" width="192" height="192" rx="64" fill="#15181E" stroke="#FFAA13" stroke-width="28"/>
+  <circle cx="304" cy="512" r="34" fill="#FFF1CB"/>
+  <circle cx="720" cy="512" r="34" fill="#FFF1CB"/>
+</svg>
