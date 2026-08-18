@@ -20,6 +20,11 @@ Comparing change-sets, rather than watching for writes, is what catches the
 afterwards has been reverted, and a reversion is a modification. Appearing,
 disappearing, and changing all count.
 
+A change-set is measured against HEAD, though, so it goes blind the moment the
+agent MOVES HEAD — `git commit` hides an agent's whole diff behind it. So the
+refs are recorded too (`snapshot_refs`/`enforce_refs`), and any movement of
+HEAD or the branch across an agent phase is the same kind of breach.
+
 A breach is NOT a gate violation. Gates are for work an agent can be asked to
 redo; a breach cannot be corrected by re-prompting, because the write already
 happened. It aborts the phase and names every offending path.
@@ -35,7 +40,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from .data_types import AgentConfig, SSSFConfig
+from .data_types import AgentConfig, EventRecord, SSSFConfig
 
 
 class PermissionBreach(RuntimeError):
@@ -43,12 +48,13 @@ class PermissionBreach(RuntimeError):
 
 
 def _git(args: list[str], cwd) -> str:
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
+                            encoding="utf-8")
     return result.stdout if result.returncode == 0 else ""
 
 
-def snapshot(run) -> dict[str, str]:
-    """Fingerprint every path the working tree currently differs on.
+def _snapshot_tree(cwd) -> dict[str, str]:
+    """Fingerprint every path `cwd`'s working tree currently differs on.
 
     Tracked files carry their numstat counts, so an edit to an already-dirty
     file still registers as a change. Untracked files are listed by name.
@@ -56,16 +62,112 @@ def snapshot(run) -> dict[str, str]:
     `data_dir` — where handoff files legitimately land — needs no special case.
     """
     fingerprints: dict[str, str] = {}
-    for line in _git(["diff", "HEAD", "--numstat"], run.repo_root).splitlines():
+    for line in _git(["diff", "HEAD", "--numstat"], cwd).splitlines():
         fields = line.split("\t")
         if len(fields) >= 3:
             path = fields[-1].strip()
             fingerprints[path] = f"{fields[0]},{fields[1]}"
-    for path in _git(["ls-files", "--others", "--exclude-standard"],
-                     run.repo_root).splitlines():
+    for path in _git(["ls-files", "--others", "--exclude-standard"], cwd).splitlines():
         if path.strip():
             fingerprints[path.strip()] = "untracked"
     return fingerprints
+
+
+def snapshot(run) -> dict[str, str]:
+    """Fingerprint the RUN's own tree — `run.repo_root`, the worktree once
+    one has been entered."""
+    return _snapshot_tree(run.repo_root)
+
+
+# ── the ref tripwire: what the content snapshot cannot see ───────────────────
+#
+# THE HOLE THIS CLOSES. Everything above compares the WORKING TREE against
+# HEAD. An agent that COMMITS erases its own evidence from that comparison:
+# `git diff HEAD --numstat` after `git commit -am` reports nothing, the
+# untracked list is empty, and `enforce()` concludes the agent touched no path
+# at all. The same is true of `git checkout <branch>`, `git reset --hard`, and
+# `git stash` — each one moves HEAD or the branch out from under the very
+# baseline the content check is measured against, and every one of them is
+# reachable from the `bash` tool the builder legitimately needs to run a test
+# suite.
+#
+# So the refs are recorded too, before and after every agent phase, and any
+# movement is a breach. It is deliberately absolute rather than clever: within
+# ONE agent phase the runner never commits and never switches branches. Branch
+# creation happens in `Run.enter_worktree()`, before any agent runs; commits
+# happen in a `code` phase of their own (`git_helper.commit_all`), never inside
+# an agent phase. So "HEAD moved during an agent phase" has exactly one
+# author — the agent — and needs no bookkeeping to attribute.
+#
+# Two `rev-parse` answers from ONE git call per boundary, which is nothing
+# beside the coding-agent turn it brackets.
+
+
+def _snapshot_refs(cwd) -> tuple[str, str]:
+    """`(HEAD sha, branch name)` for `cwd` — one `git rev-parse` for both.
+
+    A non-git directory (the four read-only ADWs run fine in one) answers
+    `("", "")` for both the before and the after, which compares equal and
+    trips nothing. A detached HEAD answers `"HEAD"` for the branch, which is a
+    perfectly good value to compare — it changing means the tree was
+    reattached under the agent.
+    """
+    out = _git(["rev-parse", "HEAD", "--abbrev-ref", "HEAD"], cwd).splitlines()
+    head = out[0].strip() if out else ""
+    branch = out[1].strip() if len(out) > 1 else ""
+    return head, branch
+
+
+def snapshot_refs(run) -> tuple[str, str]:
+    """Record the RUN's own tree refs — the other half of `snapshot()`'s
+    baseline, taken at the same moment and compared by `enforce_refs()`."""
+    return _snapshot_refs(run.repo_root)
+
+
+def enforce_refs(run, agent: AgentConfig, before: tuple[str, str]) -> None:
+    """Fail the phase if HEAD or the branch moved while the agent was working.
+
+    Checked BEFORE the content comparison in `enforce()`, and that order is the
+    whole point: a commit is what BLINDS the content comparison, so discovering
+    it afterwards would mean reporting "this agent touched nothing" about a run
+    that rewrote the repo. Raising the same `PermissionBreach` means the caller
+    needs no new branch — a breach already aborts the phase and is already
+    traced, because it cannot be corrected by re-prompting (the write has
+    happened).
+
+    One honest caveat, named in the message rather than papered over: for the
+    read-only ADWs `repo_root` IS the main checkout, where the operator is a
+    legitimate second author. An operator committing there during a long
+    `adw_scout` run trips this. That is the right trade — the alternative is a
+    tripwire that is silent in exactly the checkout where an agent's commit
+    would be least expected and hardest to spot — and the message says which
+    two things it could be, so a human is never left guessing.
+    """
+    after = _snapshot_refs(run.repo_root)
+    if after == before:
+        return
+    moved = []
+    if after[0] != before[0]:
+        moved.append(f"HEAD {before[0][:12] or '(none)'} -> {after[0][:12] or '(none)'}")
+    if after[1] != before[1]:
+        moved.append(f"branch {before[1] or '(none)'} -> {after[1] or '(none)'}")
+    raise PermissionBreach(
+        f"{agent.name} moved this run's git refs in {run.repo_root}: {'; '.join(moved)}. "
+        f"The runner does not commit, branch or check out inside an agent phase - branches "
+        f"are cut before any agent runs and commits happen in their own code phase - so "
+        f"this came from the agent itself (a `git commit`, `checkout`, `reset` or `stash` "
+        f"through its bash tool), or from a person working in this same checkout while the "
+        f"run was in flight. Either way the content check below is now blind: a commit "
+        f"moves the agent's edits behind HEAD, where `git diff HEAD` cannot see them. "
+        f"Nothing was rolled back - this factory does not rewrite history it did not "
+        f"write. Inspect it with: git -C {run.repo_root} log --stat -3")
+
+
+def snapshot_main(run) -> dict[str, str]:
+    """Fingerprint the MAIN CHECKOUT — always `run.main_root`, regardless of
+    where the run's own tree has moved to. The other half of the tripwire's
+    diff (5.5)."""
+    return _snapshot_tree(run.main_root)
 
 
 def changed_paths(before: dict[str, str], after: dict[str, str]) -> list[str]:
@@ -156,8 +258,53 @@ def _roll_back(run, path: str, before: dict[str, str], after: dict[str, str]) ->
         except OSError as error:
             return f"could not delete ({error})"
     result = subprocess.run(["git", "checkout", "--", path],
-                            cwd=run.repo_root, capture_output=True, text=True)
+                            cwd=run.repo_root, capture_output=True, text=True,
+                            encoding="utf-8")
     return "rolled back" if result.returncode == 0 else "could not roll back"
+
+
+def _check_main_checkout(run) -> list[str]:
+    """The tripwire (5.5): the enforcement window narrows to the run's own
+    tree the moment a worktree exists, so an agent using `bash` with an
+    absolute path into the main checkout would otherwise be invisible to
+    `enforce()` below. The baseline is seeded by `Run.enter_worktree()` —
+    BEFORE any agent runs, not lazily here — so this compares `run.main_root`
+    against a snapshot that predates the first agent phase, not one taken
+    after it. A changed path matching `protected_files` raises the SAME
+    `PermissionBreach` a same-tree breach would (MAP rule 13 — the factory's
+    own machinery must not change under a running ADW); anything else is
+    returned for the caller to log as non-fatal drift — the operator editing
+    `apps/ui` or `docs/` in the main checkout while a run is in flight is
+    normal life on this laptop and must not abort an overnight run.
+
+    No-op when the run has no worktree (`repo_root == main_root`): `enforce`'s
+    own same-tree check already covers that directory in full, and snapshotting
+    it a second time would just re-report the same permitted changes as drift.
+    """
+    if str(run.repo_root) == str(run.main_root):
+        return []
+    before = run._main_checkout_snapshot
+    after = snapshot_main(run)
+    run._main_checkout_snapshot = after
+    if before is None:
+        # Unreachable in normal operation: `enter_worktree()` seeds the
+        # baseline before the first agent phase runs, and the guard above
+        # already returns early for any run that has not entered a worktree
+        # (repo_root == main_root). Kept as a defensive no-op rather than an
+        # AttributeError if a future call path ever reaches here first.
+        return []
+    touched = changed_paths(before, after)
+    if not touched:
+        return []
+    protected = run.cfg.defaults.protected_files
+    breaches = [p for p in touched if any(_matches(p, pattern) for pattern in protected)]
+    if breaches:
+        raise PermissionBreach(
+            f"the main checkout ({run.main_root}) changed during this run and touched "
+            f"protected path(s): {breaches} - the factory's own machinery must not "
+            f"change under a running ADW (MAP rule 13). This did not come through the "
+            f"run's own tree ({run.repo_root}); something wrote there directly.")
+    return touched
 
 
 def enforce(run, phase, agent: AgentConfig, before: dict[str, str]) -> list[str]:
@@ -173,6 +320,14 @@ def enforce(run, phase, agent: AgentConfig, before: dict[str, str]) -> list[str]
     after = snapshot(run)
     touched = changed_paths(before, after)
     breaches = [p for p in touched if not permitted(p, agent, run.cfg)]
+
+    drift = _check_main_checkout(run)               # may itself raise PermissionBreach
+    if drift:
+        run.tracer.event(EventRecord(adw_id=run.adw_id, phase_id=phase.phase_id,
+                                     type="log", name="main_checkout_drift",
+                                     payload={"agent": agent.name, "paths": drift,
+                                              "main_root": str(run.main_root)}))
+
     if not breaches:
         return touched
 
@@ -180,6 +335,6 @@ def enforce(run, phase, agent: AgentConfig, before: dict[str, str]) -> list[str]
     scope = ("read-only" if agent.writes == []
              else f"limited to {agent.writes}" if agent.writes
              else f"barred from {run.cfg.defaults.protected_files}")
-    detail = "\n".join(f"  - {p} — {outcome}" for p, outcome in outcomes.items())
+    detail = "\n".join(f"  - {p} - {outcome}" for p, outcome in outcomes.items())
     raise PermissionBreach(
         f"{agent.name} is {scope} but modified {len(breaches)} path(s):\n{detail}")

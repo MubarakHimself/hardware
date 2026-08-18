@@ -10,15 +10,24 @@ disposes.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
-from . import agent_pi, permissions, prompts
-from .data_types import (AgentCall, AgentConfig, EnvelopeBase, EventRecord,
-                         GateCheck, GateReport, Phase, PiRequest, SSSFConfig,
-                         UsageBreakdown)
+from . import agent_pi, git_helper, permissions, prompts
+from .data_types import (
+    AgentCall,
+    AgentConfig,
+    EnvelopeBase,
+    EventRecord,
+    GateCheck,
+    GateReport,
+    Phase,
+    PiRequest,
+    SSSFConfig,
+    UsageBreakdown,
+)
 from .utils import new_id
 
 JSON_FIX_ATTEMPTS = 2      # continue-with-correction attempts for malformed JSON
@@ -31,21 +40,96 @@ class GateFailure(RuntimeError):
 # ── config ───────────────────────────────────────────────────────────────────
 
 def load_config(path: str = "adws/adw_sssf_config/sssf.config.yaml") -> SSSFConfig:
-    raw = yaml.safe_load(Path(path).read_text()) or {}
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    _apply_trunk_env(raw)
     defaults = raw.get("defaults", {}) or {}
+    default_harness = expand_harness_paths(defaults.get("harness_engineering", []) or [])
     for agent in raw.get("agents", []) or []:
         for key in ("coding_agent", "model", "thinking", "color", "tools", "writes"):
             if key in defaults:
                 agent.setdefault(key, defaults[key])
-        agent.setdefault("harness_engineering", defaults.get("harness_engineering", []))
+        # harness_engineering does NOT setdefault/replace like the keys above:
+        # it MERGES. defaults.harness_engineering is roster-wide (e.g. a bridge
+        # extension every claude-bridge lane needs); an agent's own list is its
+        # extra, specific needs (e.g. planner's subagents.ts). A plain
+        # setdefault/replace here is the landmine MAP rule 3 calls out - an
+        # agent that already names its own list would silently never gain a
+        # roster-wide extension added to defaults later.
+        agent["harness_engineering"] = merge_unique(
+            default_harness, expand_harness_paths(agent.get("harness_engineering", []) or []))
     return SSSFConfig(**raw)
+
+
+def _apply_trunk_env(raw: dict) -> None:
+    """`$SSSF_INTEGRATION_BRANCH` over `worktrees.trunk`, in place.
+
+    THE ONE VARIABLE THAT NAMES THE FACTORY'S WORKING LINE (specs/engine.md 2:
+    "the worktree and dispatch side read the same variable"). It did not reach
+    this side. `engine.py`, `adws/worktrees.py`'s default and
+    `quality.ai_defects` all resolve the trunk through
+    `git_helper.factory_trunk()`, which is env-aware - while everything loaded
+    from here read `worktrees.trunk` literally off the roster. Set the variable
+    and the factory split down the middle: the engine merged into the branch it
+    named, and `ensure_run_worktree` kept cutting runs from `integration` while
+    `push_run_branch` kept measuring "ahead" against it. Inert at the defaults,
+    and a quiet bifurcation the day the documented configuration was used.
+
+    Applied to the RAW mapping before `SSSFConfig` validates it, so there is one
+    answer for every reader of the loaded config and no second code path.
+
+    Only an explicitly set, non-empty value overrides. `factory_trunk()` answers
+    `"integration"` for both unset and empty, and using that answer here would
+    quietly overwrite a roster that deliberately names some other line - the
+    file has to keep the last word whenever the environment says nothing.
+    """
+    trunk = (os.environ.get(git_helper.FACTORY_TRUNK_ENV) or "").strip()
+    if not trunk:
+        return
+    block = raw.get("worktrees")
+    if not isinstance(block, dict):
+        block = {}
+        raw["worktrees"] = block
+    block["trunk"] = trunk
+
+
+def expand_harness_paths(entries: list[str]) -> list[str]:
+    """$VAR / ${VAR} (os.path.expandvars also covers %VAR% on Windows), then
+    ~, applied to every harness_engineering entry before it is ever used -
+    so a per-host, outside-the-repo extension path (e.g. PI_BRIDGE_PATH; see
+    sssf.shipping.config.yaml's own comment) never has to be a literal
+    absolute path baked into a config file tracked in git, the way the two-box
+    model's laptop/server split requires (MAP.md "Platform landmines": PI_PATH
+    is re-derived per host the same way).
+
+    An unresolved ${VAR} (the env var was never set - expandvars leaves the
+    string verbatim, e.g. "${PI_BRIDGE_PATH}/src/index.ts") is NOT caught
+    here: it is left exactly as written, a literal path that does not exist,
+    and fails LOUD downstream at validate() time when
+    agent_pi.resolve_model() cannot find a real pi extension there (the
+    existing SystemExit behavior - see validate() below).
+    """
+    return [os.path.expanduser(os.path.expandvars(entry)) for entry in entries]
+
+
+def merge_unique(base: list[str], extra: list[str]) -> list[str]:
+    """Union of two lists, order-stable, no duplicates.
+
+    Every `base` item first (in its own order), then any `extra` item not
+    already present (in its own order). Used to compose
+    `defaults.harness_engineering` with each agent's own list.
+    """
+    merged = list(base)
+    for item in extra:
+        if item not in merged:
+            merged.append(item)
+    return merged
 
 
 def resolve(cfg: SSSFConfig, name: str) -> AgentConfig:
     for agent in cfg.agents:
         if agent.name == name:
             return agent
-    raise SystemExit(f"agent {name!r} is not defined in the config — "
+    raise SystemExit(f"agent {name!r} is not defined in the config - "
                      f"available: {[a.name for a in cfg.agents]}")
 
 
@@ -66,7 +150,13 @@ def validate(cfg: SSSFConfig, required: list[str]) -> None:
             if not Path(ref).is_file():
                 problems.append(f"agent {name!r}: {label} prompt not found: {ref}")
         try:
-            agent_pi.resolve_model(agent.model)
+            # The catalog probe must carry the SAME extensions this agent
+            # actually runs with (its merged harness_engineering, composed by
+            # load_config's merge_unique above) - a claude-bridge/* model is
+            # registered only once the bridge extension that names it loads,
+            # so validating without -e makes every bridge lane structurally
+            # unresolvable and SystemExits a config that is actually fine.
+            agent_pi.resolve_model(agent.model, extensions=tuple(agent.harness_engineering))
         except ValueError as e:
             problems.append(f"agent {name!r}: {e}")
     if problems:
@@ -139,7 +229,13 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
     # What the tree looked like before this agent got its hands on it. Every
     # send in this phase — first prompt, JSON retries, gate corrections — is
     # measured against this one baseline.
+    #
+    # The refs are recorded beside it, and they are the half that does not go
+    # blind: `tree_before` is a diff against HEAD, so an agent that commits
+    # moves its own work behind the baseline and the content comparison reports
+    # nothing at all. `ref_before` catches exactly that (permissions.enforce_refs).
     tree_before = permissions.snapshot(run)
+    ref_before = permissions.snapshot_refs(run)
 
     result = send(user_text)
     envelope, attempt = _parse_with_retries(run, phase, call, result, send)
@@ -175,7 +271,12 @@ def execute(run, phase: Phase, call: AgentCall) -> EnvelopeBase:
     # Permission is checked after every send is done, and before the envelope is
     # accepted: an agent does not get to report success on a phase in which it
     # wrote somewhere it was not allowed to.
+    #
+    # Refs FIRST, then content. A commit made during the phase is what makes
+    # the content comparison meaningless, so checking it second would mean
+    # reporting "touched nothing" about a run that rewrote the repo.
     try:
+        permissions.enforce_refs(run, agent, ref_before)
         touched = permissions.enforce(run, phase, agent, tree_before)
     except permissions.PermissionBreach as breach:
         run.tracer.event(EventRecord(adw_id=run.adw_id, phase_id=phase.phase_id,
@@ -288,7 +389,7 @@ def _parse_with_retries(run, phase: Phase, call: AgentCall, result, send):
 
 
 def _persist_envelope(run, phase: Phase, agent_name: str, call: AgentCall,
-                      envelope: Optional[EnvelopeBase], attempt: int,
+                      envelope: EnvelopeBase | None, attempt: int,
                       valid: bool, raw: str = "") -> None:
     payload_json = envelope.model_dump_json(indent=2) if envelope else json.dumps({"raw": raw[-2000:]})
     run.tracer.envelope_row(phase, agent_name, call.output_type.__name__,
@@ -297,4 +398,5 @@ def _persist_envelope(run, phase: Phase, agent_name: str, call: AgentCall,
         record = {"agent_name": agent_name, "purpose": resolve(run.cfg, agent_name).purpose,
                   "output_type": call.output_type.__name__, "attempt": attempt,
                   **envelope.model_dump()}
-        (run.session_dir / agent_name / "envelope.json").write_text(json.dumps(record, indent=2))
+        (run.session_dir / agent_name / "envelope.json").write_text(
+            json.dumps(record, indent=2), encoding="utf-8")
