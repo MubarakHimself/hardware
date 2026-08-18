@@ -5,9 +5,9 @@ import { getServerConfig } from "@/lib/server/config";
 export const dynamic = "force-dynamic";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const actor = await requireRequestCapability("catalog:read");
+  await requireRequestCapability("catalog:read");
   return (
-    <HardwareShell mode={getServerConfig().mode} role={actor.role}>
+    <HardwareShell mode={getServerConfig().mode}>
       {children}
     </HardwareShell>
   );

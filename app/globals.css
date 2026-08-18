@@ -28,8 +28,46 @@
   --focus: #2e8968;
   --sidebar: #18231d;
   --sidebar-accent: #8bddb7;
+  --sidebar-text: #ffffff;
+  --on-solid: #ffffff;
+  --backdrop: rgb(17 25 20 / 55%);
+  --shadow-color: rgb(32 45 37 / 8%);
+  --youtube: #c9362b;
   --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+html[data-theme="dark"] {
+  --canvas: #0d1210;
+  --surface: #141b17;
+  --surface-subtle: #111713;
+  --surface-raised: #1b251f;
+  --surface-sunken: #090d0b;
+  --ink: #edf4ef;
+  --ink-soft: #d3ded6;
+  --muted-strong: #a9b8ae;
+  --muted: #91a097;
+  --line: #26352c;
+  --line-strong: #3a4c41;
+  --accent: #60c49a;
+  --accent-strong: #84d8b4;
+  --accent-soft: #17352a;
+  --accent-line: #285a46;
+  --success: #74cea6;
+  --success-soft: #173529;
+  --success-line: #285a45;
+  --warning: #efba66;
+  --warning-soft: #372a17;
+  --warning-line: #65502c;
+  --danger: #f08e84;
+  --danger-soft: #3b211f;
+  --danger-line: #6e3732;
+  --focus: #82dbb5;
+  --sidebar: #080c0a;
+  --sidebar-accent: #7bd6af;
+  --backdrop: rgb(3 7 5 / 72%);
+  --shadow-color: rgb(0 0 0 / 38%);
+  --youtube: #eb655a;
 }
 
 @theme inline {
@@ -46,7 +84,7 @@
 html {
   min-width: 320px;
   background: var(--canvas);
-  color-scheme: light;
+  color-scheme: light dark;
   scroll-behavior: smooth;
 }
 

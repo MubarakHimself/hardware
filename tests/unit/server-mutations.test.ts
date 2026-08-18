@@ -33,16 +33,41 @@ const queueMock = vi.hoisted(() => ({
 
 vi.mock("../../db/index", () => ({ getPool: () => databaseMock.pool }));
 vi.mock("../../lib/server/config", () => ({
-  getServerConfig: () => ({ mode: "production" }),
+  getServerConfig: () => ({ mode: "local", youtubeApiKey: "test-key" }),
 }));
 vi.mock("../../lib/server/job-queue", () => ({
   addTrackedGraphileJob: queueMock.add,
 }));
+vi.mock("../../lib/integrations", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/integrations")>();
+  return {
+    ...actual,
+    YouTubeClient: class {
+      async resolveChannel() {
+        return {
+          id: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+          uploadsPlaylistId: "UU_x5XG1OV2P6uZZ5FSM9Ttw",
+          title: "Resolved channel",
+          handle: "@resolved",
+          canonicalUrl: "https://www.youtube.com/@resolved",
+          thumbnailUrl: "https://yt.example/channel.jpg",
+        };
+      }
+    },
+  };
+});
 
 import { mergeProject } from "../../lib/server/project-mutations";
 import { decideRepositoryCandidate } from "../../lib/server/repository-candidates";
 import { queueImport } from "../../lib/server/imports";
-import { listJobs, queueProjectMetadataRefresh } from "../../lib/server/jobs";
+import { listJobs, queueProjectMetadataRefresh, retryJob } from "../../lib/server/jobs";
+import {
+  addChannel,
+  historySinceInstant,
+  syncChannel,
+  updateChannelSettings,
+} from "../../lib/server/channels";
+import { updateSourceReview } from "../../lib/server/source-reviews";
 
 const actor = {
   userId: "00000000-0000-4000-8000-000000000012",
@@ -62,6 +87,266 @@ beforeEach(() => {
 });
 
 describe("transactional server mutations", () => {
+  it("converts an explicit personal calendar date from local midnight", () => {
+    expect(historySinceInstant({
+      mode: "since",
+      since: "2026-07-01",
+      utcOffsetMinutes: 180,
+    })?.toISOString()).toBe("2026-06-30T21:00:00.000Z");
+  });
+
+  it("does not overwrite settings when an already-monitored channel is added again", async () => {
+    const channelId = "60000000-0000-4000-8000-000000000010";
+    databaseMock.state.responder = (text) => {
+      if (text.includes("select id, enabled") && text.includes("from channel_sources")) {
+        return { rows: [{ id: channelId, enabled: true }] };
+      }
+      if (text.includes("update channel_sources")) {
+        return {
+          rows: [{
+            id: channelId,
+            youtubeChannelId: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+            title: "Resolved channel",
+            handle: "@resolved",
+            canonicalUrl: "https://www.youtube.com/@resolved",
+            thumbnailUrl: "https://yt.example/channel.jpg",
+            state: "paused",
+            syncFrequency: "manual",
+            initialHistoryMode: "all",
+            initialHistorySince: null,
+            lastSyncedAt: new Date("2026-07-20T10:00:00.000Z"),
+            nextSyncAt: null,
+          }],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    const result = await addChannel({
+      actor,
+      input: {
+        url: "https://www.youtube.com/@resolved",
+        syncFrequency: "daily",
+        initialHistory: { mode: "latest_10" },
+      },
+      correlationId,
+    });
+
+    expect(result).toMatchObject({
+      created: false,
+      monitoringStarted: false,
+      jobId: null,
+      channel: {
+        paused: true,
+        syncFrequency: "manual",
+        initialHistoryMode: "all",
+      },
+    });
+    const metadataUpdate = databaseMock.state.queries.find(
+      ({ text }) => text.includes("update channel_sources"),
+    );
+    expect(metadataUpdate?.text).not.toContain("enabled = true");
+    expect(metadataUpdate?.text).not.toContain("sync_frequency =");
+    expect(queueMock.add).not.toHaveBeenCalled();
+  });
+
+  it("reuses the active channel lane instead of racing a second manual source job", async () => {
+    const channelId = "60000000-0000-4000-8000-000000000001";
+    const activeJobId = "60000000-0000-4000-8000-000000000002";
+    databaseMock.state.responder = (text) => {
+      if (text.includes("from channel_sources") && text.includes("for update")) {
+        return { rows: [{ id: channelId }] };
+      }
+      if (text.includes("from ingestion_jobs") && text.includes("state in ('queued', 'running')")) {
+        return { rows: [{ id: activeJobId }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    await expect(syncChannel({ actor, channelId, correlationId })).resolves.toEqual({
+      channelId,
+      jobId: activeJobId,
+      created: false,
+    });
+
+    expect(databaseMock.state.queries.some(({ text }) => text.includes("pg_advisory_xact_lock"))).toBe(true);
+    expect(databaseMock.state.queries.some(({ text }) => text.includes("insert into ingestion_jobs"))).toBe(false);
+    expect(queueMock.add).not.toHaveBeenCalled();
+    expect(databaseMock.state.queries.at(-1)?.text.trim()).toBe("commit");
+  });
+
+  it("resumes automatic sync from the last successful schedule and catches overdue sources up", async () => {
+    const channelId = "60000000-0000-4000-8000-000000000003";
+    databaseMock.state.responder = (text) => text.includes("update channel_sources")
+      ? {
+          rows: [{
+            id: channelId,
+            paused: false,
+            syncFrequency: "weekly",
+            nextSyncAt: new Date("2026-07-29T10:00:00.000Z"),
+          }],
+        }
+      : { rows: [], rowCount: 0 };
+
+    await expect(updateChannelSettings({
+      actor,
+      channelId,
+      input: { paused: false, syncFrequency: "weekly" },
+      correlationId,
+    })).resolves.toMatchObject({
+      channelId,
+      paused: false,
+      syncFrequency: "weekly",
+    });
+
+    const update = databaseMock.state.queries.find(({ text }) => text.includes("update channel_sources"));
+    expect(update?.text).toContain("last_synced_at + interval '7 days'");
+    expect(update?.text).toContain("greatest(");
+    expect(update?.text).toContain("when coalesce($2::channel_sync_frequency, sync_frequency) = 'manual' then null");
+  });
+
+  it("queues a due-now poll when a schedule change has no active channel job", async () => {
+    const channelId = "60000000-0000-4000-8000-000000000004";
+    const jobId = "60000000-0000-4000-8000-000000000005";
+    databaseMock.state.responder = (text) => {
+      if (text.includes("update channel_sources")) {
+        return {
+          rows: [{
+            id: channelId,
+            paused: false,
+            syncFrequency: "daily",
+            nextSyncAt: new Date("2026-07-22T10:00:00.000Z"),
+            dueNow: true,
+          }],
+        };
+      }
+      if (text.includes("insert into ingestion_jobs")) {
+        return { rows: [{ id: jobId }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    await expect(updateChannelSettings({
+      actor,
+      channelId,
+      input: { syncFrequency: "daily" },
+      correlationId,
+    })).resolves.toMatchObject({ jobId, created: true });
+
+    expect(queueMock.add).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        task: "channel_poll",
+        queueName: `channel:${channelId}`,
+      }),
+    );
+  });
+
+  it("serializes a failed channel retry and reuses the active lane", async () => {
+    const channelId = "60000000-0000-4000-8000-000000000006";
+    const failedJobId = "60000000-0000-4000-8000-000000000007";
+    const activeJobId = "60000000-0000-4000-8000-000000000008";
+    databaseMock.state.responder = (text) => {
+      if (text.includes("where id = $1::uuid for update")) {
+        return { rows: [{
+          id: failedJobId,
+          type: "channel_poll",
+          state: "failed",
+          scope_type: "channel",
+          scope_id: channelId,
+          checkpoint: { channelSourceId: channelId },
+        }] };
+      }
+      if (text.includes("state in ('queued', 'running')")) {
+        return { rows: [{ id: activeJobId, state: "running" }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    await expect(retryJob({
+      actor,
+      jobId: failedJobId,
+      correlationId,
+    })).resolves.toEqual({ id: activeJobId, state: "running", created: false });
+    expect(queueMock.add).not.toHaveBeenCalled();
+    expect(databaseMock.state.queries.some(
+      ({ text }) => text.includes("pg_advisory_xact_lock"),
+    )).toBe(true);
+  });
+
+  it("persists a source-review resolution note and its local owner", async () => {
+    const reviewId = "60000000-0000-4000-8000-000000000009";
+    const issueFingerprint = "a".repeat(64);
+    databaseMock.state.responder = (text) => text.includes("update source_reviews")
+      ? {
+          rows: [{
+            id: reviewId,
+            state: "resolved",
+            issueFingerprint,
+            version: 4,
+            resolutionNote: "Confirmed against the source description.",
+            resolvedByUserId: actor.userId,
+            resolvedAt: new Date("2026-07-22T10:00:00.000Z"),
+          }],
+        }
+      : { rows: [], rowCount: 0 };
+
+    await expect(updateSourceReview({
+      actor,
+      reviewId,
+      state: "resolved",
+      note: "Confirmed against the source description.",
+      expectedIssueFingerprint: issueFingerprint,
+      expectedVersion: 3,
+      correlationId,
+    })).resolves.toMatchObject({
+      id: reviewId,
+      state: "resolved",
+      version: 4,
+      resolvedByUserId: actor.userId,
+    });
+
+    const update = databaseMock.state.queries.find(
+      ({ text }) => text.includes("update source_reviews"),
+    );
+    expect(update?.text).toContain("resolved_by_user_id");
+    expect(update?.text).toContain("resolution_note");
+    expect(update?.values).toEqual([
+      reviewId,
+      "resolved",
+      actor.userId,
+      "Confirmed against the source description.",
+      issueFingerprint,
+      3,
+    ]);
+  });
+
+  it("rejects a source-review decision made against stale evidence", async () => {
+    const reviewId = "60000000-0000-4000-8000-000000000011";
+    databaseMock.state.responder = (text) => {
+      if (text.includes("update source_reviews")) return { rows: [], rowCount: 0 };
+      if (text.includes("select 1 from source_reviews")) {
+        return { rows: [{ exists: 1 }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    await expect(updateSourceReview({
+      actor,
+      reviewId,
+      state: "ignored",
+      expectedIssueFingerprint: "b".repeat(64),
+      expectedVersion: 2,
+      correlationId,
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "source_review_stale",
+    });
+
+    expect(databaseMock.state.queries.at(-1)?.text.trim()).toBe("rollback");
+    expect(queueMock.add).not.toHaveBeenCalled();
+  });
+
   it("merges provenance, personal state, candidates, aliases, and repository ownership atomically", async () => {
     databaseMock.state.responder = (text, values) => {
       if (text.includes("from projects where id::text = $1 or slug = $1")) {
@@ -279,7 +564,7 @@ describe("transactional server mutations", () => {
     );
     expect(domainJob?.values?.[6]).toBe(
       JSON.stringify({
-        url: "https://Project.Example/?utm_source=video&b=2&a=1",
+        url: "https://project.example?a=1&b=2",
       }),
     );
     const graphileJob = databaseMock.state.queries.find(({ text }) =>
@@ -288,7 +573,121 @@ describe("transactional server mutations", () => {
     expect(JSON.parse(String(graphileJob?.values?.[1]))).toEqual({
       jobId,
       correlationId,
-      url: "https://Project.Example/?utm_source=video&b=2&a=1",
+      url: "https://project.example?a=1&b=2",
+    });
+  });
+
+  it("rejects direct social-video imports before opening the database", async () => {
+    for (const url of [
+      "https://vimeo.com/123",
+      "https://www.dailymotion.com/video/x123",
+      "https://www.twitch.tv/videos/123",
+    ]) {
+      await expect(
+        queueImport({
+          actor,
+          input: { kind: "website", url },
+          correlationId,
+        }),
+      ).rejects.toThrow("social-video imports are not supported");
+    }
+
+    expect(databaseMock.pool.connect).not.toHaveBeenCalled();
+    expect(databaseMock.state.queries).toHaveLength(0);
+  });
+
+  it("deduplicates the same normalized import even when callers supply different request keys", async () => {
+    const jobId = "70000000-0000-4000-8000-000000000002";
+    let persistedJob: Record<string, unknown> | undefined;
+    databaseMock.state.responder = (text, values) => {
+      if (text.includes("where scope_type = $1 and scope_id = $2")) {
+        return { rows: persistedJob ? [persistedJob] : [] };
+      }
+      if (text.includes("insert into ingestion_jobs")) {
+        persistedJob = {
+          id: jobId,
+          type: "website_metadata",
+          state: "queued",
+          idempotencyKey: values?.[1],
+          correlationId,
+          createdAt: new Date("2026-07-22T00:00:00.000Z"),
+        };
+        return { rows: [persistedJob] };
+      }
+      if (text.includes("graphile_worker.add_job")) {
+        return { rows: [{ id: 92 }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    const first = await queueImport({
+      actor,
+      input: { kind: "website", url: "https://Project.Example/?utm_source=one" },
+      correlationId,
+      suppliedIdempotencyKey: "random-browser-key-1",
+    });
+    const second = await queueImport({
+      actor,
+      input: { kind: "website", url: "https://project.example" },
+      correlationId,
+      suppliedIdempotencyKey: "unrelated-browser-key-2",
+    });
+
+    expect(first.created).toBe(true);
+    expect(second).toEqual({ job: first.job, created: false });
+    expect(databaseMock.state.queries.filter(({ text }) => text.includes("insert into ingestion_jobs"))).toHaveLength(1);
+    expect(databaseMock.state.queries.filter(({ text }) => text.includes("graphile_worker.add_job"))).toHaveLength(1);
+  });
+
+  it("queues a YouTube channel as durable resolver work without provider I/O", async () => {
+    const jobId = "70000000-0000-4000-8000-000000000003";
+    databaseMock.state.responder = (text, values) => {
+      if (text.includes("insert into ingestion_jobs")) {
+        return {
+          rows: [{
+            id: jobId,
+            type: "channel_resolve",
+            state: "queued",
+            idempotencyKey: values?.[1],
+            correlationId,
+            createdAt: new Date("2026-07-22T00:00:00.000Z"),
+          }],
+        };
+      }
+      if (text.includes("graphile_worker.add_job")) {
+        return { rows: [{ id: 93 }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    await expect(queueImport({
+      actor,
+      input: {
+        kind: "youtube_channel",
+        url: "https://www.youtube.com/@GoogleDevelopers/videos",
+      },
+      correlationId,
+    })).resolves.toMatchObject({
+      created: true,
+      job: { id: jobId, type: "channel_resolve", state: "queued" },
+    });
+
+    const domainJob = databaseMock.state.queries.find(({ text }) =>
+      text.includes("insert into ingestion_jobs"),
+    );
+    expect(JSON.parse(String(domainJob?.values?.[6]))).toEqual({
+      url: "https://www.youtube.com/@googledevelopers",
+      requestedByUserId: actor.userId,
+    });
+    const graphileJob = databaseMock.state.queries.find(({ text }) =>
+      text.includes("graphile_worker.add_job"),
+    );
+    expect(graphileJob?.values?.[0]).toBe("channel_resolve");
+    expect(JSON.parse(String(graphileJob?.values?.[1]))).toEqual({
+      jobId,
+      correlationId,
+      url: "https://www.youtube.com/@googledevelopers",
+      requestedByUserId: actor.userId,
     });
   });
 

@@ -2,7 +2,6 @@ import "server-only";
 import type { QueryResultRow } from "pg";
 import { z } from "zod";
 import { getPool } from "../../db/index";
-import { canReadCollection } from "../auth";
 import type { AuthenticatedActor, ProjectSearchQuery } from "../domain";
 import type { DemoProject } from "../demo/types";
 import { normalizeProjectUrl } from "../ingestion";
@@ -74,7 +73,10 @@ export interface ProjectPage {
   };
 }
 
-function demoSummary(project: DemoProject): ProjectSummary {
+function demoSummary(
+  project: DemoProject,
+  collectionIds: string[] = project.collectionIds,
+): ProjectSummary {
   const latest = project.sightings[0];
   const repositoryParts = project.repositoryLabel?.split("/") ?? [];
   const channel = latest
@@ -124,7 +126,7 @@ function demoSummary(project: DemoProject): ProjectSummary {
         }
       : null,
     sightingCount: project.sightingCount,
-    collectionIds: project.collectionIds,
+    collectionIds,
     isImpressive: project.isImpressive ?? false,
     note: project.note ?? null,
   };
@@ -137,6 +139,12 @@ function listDemoProjects(
   const offset = decodeOffsetCursor(query.cursor);
   const q = query.q?.toLocaleLowerCase();
   const state = getDemoState();
+  const ownerCollections = state.collections.filter(
+    (collection) => collection.ownerId === actor.userId,
+  );
+  const ownerCollectionIds = new Set(
+    ownerCollections.map((collection) => collection.id),
+  );
   const selectedChannel = query.channel
     ? state.channels.find((channel) => channel.id === query.channel)
     : undefined;
@@ -150,6 +158,9 @@ function listDemoProjects(
       project.license,
       project.topics.join(" "),
       project.note,
+      ...ownerCollections
+        .filter((collection) => collection.projectIds.includes(project.id))
+        .map((collection) => collection.name),
       ...project.sightings.flatMap((sighting) => [
         sighting.channel,
         sighting.videoTitle,
@@ -182,7 +193,13 @@ function listDemoProjects(
     if (query.license && project.license?.toLowerCase() !== query.license.toLowerCase()) {
       return false;
     }
-    if (query.collection && !project.collectionIds.includes(query.collection)) return false;
+    if (
+      query.collection &&
+      (!ownerCollectionIds.has(query.collection) ||
+        !project.collectionIds.includes(query.collection))
+    ) {
+      return false;
+    }
     if (
       query.impressive !== undefined &&
       (project.isImpressive ?? false) !== query.impressive
@@ -211,7 +228,12 @@ function listDemoProjects(
   const window = projects.slice(offset, offset + query.limit + 1);
   const hasNext = window.length > query.limit;
   return {
-    projects: window.slice(0, query.limit).map(demoSummary),
+    projects: window.slice(0, query.limit).map((project) =>
+      demoSummary(
+        project,
+        project.collectionIds.filter((id) => ownerCollectionIds.has(id)),
+      ),
+    ),
     nextCursor: hasNext ? encodeOffsetCursor(offset + query.limit) : null,
     facets: {
       channels: state.channels.map((channel) => ({
@@ -244,8 +266,7 @@ function listDemoProjects(
             (project) => project.license === license,
           ).length,
         })),
-      collections: state.collections
-        .filter((collection) => canReadCollection(actor, collection))
+      collections: ownerCollections
         .map((collection) => ({
           id: collection.id,
           name: collection.name,
@@ -374,8 +395,7 @@ export async function listProjects(
           from collection_projects search_membership
           join collections search_collection on search_collection.id = search_membership.collection_id
          where search_membership.project_id = p.id
-           and (search_collection.owner_user_id = ${actorParameter}::uuid
-                or search_collection.visibility = 'workspace')
+           and search_collection.owner_user_id = ${actorParameter}::uuid
            and lower(search_collection.name) % lower(${q})
       )
       or exists (
@@ -415,7 +435,7 @@ export async function listProjects(
       select 1 from collection_projects cpf
       join collections cf on cf.id = cpf.collection_id
       where cpf.project_id = p.id and cf.id = ${value}::uuid
-        and (cf.owner_user_id = ${actorParameter}::uuid or cf.visibility = 'workspace')
+        and cf.owner_user_id = ${actorParameter}::uuid
     )`);
   }
   if (query.impressive !== undefined) {
@@ -550,9 +570,9 @@ export async function listProjects(
            from collections c
            left join collection_projects cp on cp.collection_id = c.id
            left join projects p on p.id = cp.project_id and p.state = 'active'
-          where c.owner_user_id = $1::uuid or c.visibility = 'workspace'
+          where c.owner_user_id = $1::uuid
           group by c.id
-          order by (c.owner_user_id = $1::uuid) desc, lower(c.name), c.id`,
+          order by lower(c.name), c.id`,
         [actor.userId],
       ),
     ]);
@@ -708,7 +728,12 @@ export async function getProjectDetail(
           }
         : null,
       isImpressive: Boolean(project.isImpressive),
-      collectionIds: [...project.collectionIds],
+      collectionIds: project.collectionIds.filter((collectionId) =>
+        state.collections.some(
+          (collection) =>
+            collection.id === collectionId && collection.ownerId === actor.userId,
+        ),
+      ),
       sightings,
       links: [...primaryLink, ...repositoryLink, ...(project.additionalLinks ?? [])],
       history: state.audit

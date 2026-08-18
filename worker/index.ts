@@ -4,13 +4,21 @@ import { fileURLToPath } from "node:url";
 import { run } from "graphile-worker";
 import { z } from "zod";
 import { closeDatabase, getPool } from "../db/index";
+import { DESKTOP_DATABASE_LIMITS } from "../lib/desktop/runtime-limits";
 import { createTaskList } from "./tasks";
 import { createRuntimeTaskImplementations } from "./implementations/runtime";
 import { logger, safeErrorDetails } from "./logger";
+import { scheduleOverdueChannelPolls } from "./scheduler";
 
 const environmentSchema = z.object({
   DATABASE_URL: z.string().url().startsWith("postgresql://"),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(32).default(4),
+  GRAPHILE_POOL_MAX: z.coerce
+    .number()
+    .int()
+    .min(2)
+    .max(20)
+    .default(DESKTOP_DATABASE_LIMITS.graphileWorkerPoolMax),
   RELEASE_SHA: z.string().min(1).default("development"),
 });
 
@@ -45,6 +53,7 @@ async function writeHeartbeat(): Promise<void> {
 async function main(): Promise<void> {
   const taskImplementations = createRuntimeTaskImplementations();
   await writeHeartbeat();
+  await scheduleOverdueChannelPolls();
   const heartbeat = setInterval(() => {
     void writeHeartbeat().catch((error: unknown) => {
       logger.error({ event: "heartbeat_failed", ...safeErrorDetails(error) });
@@ -55,6 +64,7 @@ async function main(): Promise<void> {
   const runner = await run({
     connectionString: env.DATABASE_URL,
     concurrency: env.WORKER_CONCURRENCY,
+    maxPoolSize: env.GRAPHILE_POOL_MAX,
     crontabFile: fileURLToPath(new URL("./crontab", import.meta.url)),
     noHandleSignals: true,
     taskList: createTaskList(taskImplementations),

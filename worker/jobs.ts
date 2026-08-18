@@ -10,6 +10,7 @@ export const trackedJobPayloadSchema = z
 export type TrackedJobPayload = z.infer<typeof trackedJobPayloadSchema>;
 
 export const taskNames = [
+  "channel_resolve",
   "channel_backfill",
   "channel_poll",
   "video_ingest",

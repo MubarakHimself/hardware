@@ -30,12 +30,10 @@ const ids = {
 
 const admin: AuthenticatedActor = {
   userId: ADMIN_USER_ID,
-  clerkUserId: "user_hardware_mutation_smoke_admin",
   role: "admin",
 };
 const member: AuthenticatedActor = {
   userId: MEMBER_USER_ID,
-  clerkUserId: "user_hardware_mutation_smoke_member",
   role: "member",
 };
 
@@ -53,16 +51,16 @@ async function seed(pool: Pool): Promise<void> {
   try {
     await client.query("begin");
     await client.query(
-      `insert into users (id, clerk_user_id, role)
-       values ($1::uuid, $2, 'admin'), ($3::uuid, $4, 'member')
+      `insert into users (id, role)
+       values ($1::uuid, 'admin'), ($2::uuid, 'member')
        on conflict (id) do update set role = excluded.role, updated_at = now()`,
-      [ADMIN_USER_ID, admin.clerkUserId, MEMBER_USER_ID, member.clerkUserId],
+      [ADMIN_USER_ID, MEMBER_USER_ID],
     );
     await client.query(
       `insert into channel_sources
          (id, youtube_channel_id, uploads_playlist_id, handle, title, canonical_url,
-          created_by_user_id)
-       values ($1::uuid, $2, $3, $4, $5, $6, $7::uuid)`,
+          created_by_user_id, enabled)
+       values ($1::uuid, $2, $3, $4, $5, $6, $7::uuid, true)`,
       [
         ids.channel,
         `UC${runToken}`,
@@ -241,9 +239,9 @@ async function cleanup(pool: Pool): Promise<void> {
 
 async function main(): Promise<void> {
   assert.notEqual(
-    process.env.DEMO_MODE,
-    "true",
-    "Mutation database smoke must execute the production code path.",
+    process.env.APP_MODE,
+    "demo",
+    "Mutation database smoke must execute the persistent local code path.",
   );
   const pool = getPool();
   let splitProjectId: string | null = null;

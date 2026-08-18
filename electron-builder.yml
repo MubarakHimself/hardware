@@ -1,0 +1,91 @@
+appId: com.mubarak.hardware
+productName: Hardware
+copyright: Copyright © 2026 MubarakHimself
+
+electronVersion: 43.2.0
+asar: true
+compression: normal
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+afterPack: scripts/desktop/after-pack.cjs
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+
+directories:
+  app: build/desktop
+  output: release/desktop
+  buildResources: build/icons
+
+files:
+  - main.js
+  - preload.cjs
+  - utility-host.js
+  - package.json
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+  icon: build/icons/icon.ico
+  extraResources:
+    - from: build/runtime
+      to: runtime
+      filter:
+        - "**/*"
+    - from: vendor/postgres/win32-x64
+      to: postgres/win32-x64
+      filter:
+        - "**/*"
+
+nsis:
+  artifactName: ${productName}-${version}-win-${arch}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+  uninstallDisplayName: Hardware
+
+linux:
+  target:
+    - target: deb
+      arch:
+        - x64
+    - target: AppImage
+      arch:
+        - x64
+  icon: build/icons/icon.png
+  category: Utility
+  synopsis: Personal local open-source project library
+  description: A private desktop catalog for projects discovered in source videos and direct links.
+  executableName: hardware
+  maintainer: MubarakHimself <MubarakHimself@users.noreply.github.com>
+  vendor: MubarakHimself
+  extraResources:
+    - from: build/runtime
+      to: runtime
+      filter:
+        - "**/*"
+    - from: vendor/postgres/linux-x64
+      to: postgres/linux-x64
+      filter:
+        - "**/*"
+
+deb:
+  artifactName: hardware_${version}_${arch}.${ext}
+  priority: optional
+  afterInstall: scripts/desktop/linux-after-install.sh
+  afterRemove: scripts/desktop/linux-after-remove.sh
+
+appImage:
+  artifactName: ${productName}-${version}-${arch}.${ext}

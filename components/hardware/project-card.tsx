@@ -105,7 +105,7 @@ export function ProjectCard({ project, compact = false }: { project: UiProject; 
   }
 
   return (
-    <Card className="group flex min-h-[21.5rem] flex-col overflow-hidden transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-[var(--line-strong)] hover:shadow-[0_10px_28px_rgba(32,45,37,0.07)] motion-reduce:transform-none">
+    <Card className="group flex min-h-[21.5rem] flex-col overflow-hidden transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-[var(--line-strong)] hover:shadow-[0_10px_28px_var(--shadow-color)] motion-reduce:transform-none">
       <div className="flex items-start justify-between gap-4 p-5 pb-3">
         <Link href={projectHref} className="grid size-11 place-items-center rounded-xl text-sm font-black shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] focus-visible:ring-offset-2" style={{ background: project.accent, color: contrastTextColor(project.accent) }} aria-label={`Open ${project.name}`}>
           {project.initials}

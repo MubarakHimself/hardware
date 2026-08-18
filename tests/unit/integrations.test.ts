@@ -130,6 +130,14 @@ describe("bounded JSON transport", () => {
 });
 
 describe("worker integration configuration", () => {
+  it("starts with YouTube handlers disabled when no key is configured", () => {
+    expect(parseIntegrationEnvironment({})).toEqual({
+      YOUTUBE_API_KEY: undefined,
+      GITHUB_TOKEN: undefined,
+      SOURCE_HTTP_TIMEOUT_MS: 10_000,
+    });
+  });
+
   it("treats an empty optional GitHub token as absent", () => {
     expect(
       parseIntegrationEnvironment({

@@ -16,7 +16,7 @@ export default function RadarPage() {
       <PageHeading
         eyebrow={dateLabel}
         title="Radar"
-        description="Fresh project sightings, source health, and the small set of catalog decisions that need your attention."
+        description="Fresh project sightings, source health, and the small set of personal library decisions that need your attention."
       />
       <RadarClient />
     </>

@@ -1,0 +1,1 @@
+ALTER TYPE "public"."ingestion_job_type" ADD VALUE 'channel_resolve' BEFORE 'channel_backfill';

@@ -2,20 +2,20 @@ name: hardware
 
 x-app-environment: &app-environment
   NODE_ENV: production
-  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env.production}
-  DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-10}
+  APP_MODE: local
+  DATABASE_URL: ${DATABASE_URL:?Run .\hardware.ps1 setup first}
+  DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-8}
   DATABASE_SSL: ${DATABASE_SSL:-false}
   DATABASE_STATEMENT_TIMEOUT_MS: ${DATABASE_STATEMENT_TIMEOUT_MS:-15000}
-  NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?Set NEXT_PUBLIC_APP_URL in .env.production}
-  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:?Set Clerk publishable key}
-  CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:?Set CLERK_SECRET_KEY}
-  CLERK_WEBHOOK_SIGNING_SECRET: ${CLERK_WEBHOOK_SIGNING_SECRET:?Set webhook secret}
-  ADMIN_CLERK_USER_IDS: ${ADMIN_CLERK_USER_IDS:?Set at least one admin Clerk user ID}
-  HEALTHCHECK_TOKEN: ${HEALTHCHECK_TOKEN:?Set HEALTHCHECK_TOKEN}
-  YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:?Set YOUTUBE_API_KEY}
+  NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://127.0.0.1:3000}
+  LOCAL_OWNER_ID: "00000000-0000-4000-8000-000000000001"
+  LOCAL_OWNER_NAME: ${LOCAL_OWNER_NAME:-Local owner}
+  HEALTHCHECK_TOKEN: ${HEALTHCHECK_TOKEN:?Run .\hardware.ps1 setup first}
+  YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:?Add YOUTUBE_API_KEY to .env.local}
   GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+  SOURCE_HTTP_TIMEOUT_MS: ${SOURCE_HTTP_TIMEOUT_MS:-10000}
   LOG_LEVEL: ${LOG_LEVEL:-info}
-  RELEASE_SHA: ${RELEASE_SHA:-development}
+  RELEASE_SHA: ${RELEASE_SHA:-local}
 
 services:
   postgres:
@@ -24,7 +24,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-hardware}
       POSTGRES_USER: ${POSTGRES_USER:-hardware}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run .\hardware.ps1 setup first}
     healthcheck:
       test:
         [
@@ -36,18 +36,18 @@ services:
       retries: 20
       start_period: 10s
     shm_size: 256mb
+    stop_grace_period: 60s
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
       - backend
 
   migrate:
-    image: hardware:${RELEASE_SHA:-development}
+    image: hardware:${RELEASE_SHA:-local}
     build:
       context: .
       args:
-        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?Set NEXT_PUBLIC_APP_URL}
-        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:?Set Clerk publishable key}
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://127.0.0.1:3000}
     environment:
       <<: *app-environment
       SERVICE_NAME: hardware-migrate
@@ -56,28 +56,45 @@ services:
       postgres:
         condition: service_healthy
     restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     networks:
       - backend
 
   web:
-    image: hardware:${RELEASE_SHA:-development}
+    image: hardware:${RELEASE_SHA:-local}
     environment:
       <<: *app-environment
       SERVICE_NAME: hardware-web
       PORT: 3000
       HOSTNAME: 0.0.0.0
+    ports:
+      - "127.0.0.1:${HARDWARE_PORT:-3000}:3000"
     depends_on:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
     init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test:
         [
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3000/api/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "const s=require('node:net').connect(3000,'127.0.0.1',()=>s.end());s.setTimeout(4000,()=>{s.destroy();process.exit(1)});s.on('error',()=>process.exit(1))",
         ]
       interval: 15s
       timeout: 5s
@@ -87,17 +104,24 @@ services:
       - backend
 
   worker:
-    image: hardware:${RELEASE_SHA:-development}
+    image: hardware:${RELEASE_SHA:-local}
     environment:
       <<: *app-environment
       SERVICE_NAME: hardware-worker
-      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
     command: ["node", "dist-worker/index.js"]
     depends_on:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
     init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     stop_grace_period: 90s
     healthcheck:
       test:
@@ -105,7 +129,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "const{Client}=require('pg');const c=new Client({connectionString:process.env.DATABASE_URL});c.connect().then(()=>c.query(\"select 1 from worker_heartbeats where last_seen_at > now()-interval '45 seconds'\")).then(r=>{if(!r.rowCount)process.exitCode=1}).catch(()=>process.exitCode=1).finally(()=>c.end())",
+          "const{Client}=require('pg');const c=new Client({connectionString:process.env.DATABASE_URL});c.connect().then(()=>c.query(\"select 1 from worker_heartbeats where last_seen_at > now()-interval '60 seconds'\")).then(r=>{if(!r.rowCount)process.exitCode=1}).catch(()=>process.exitCode=1).finally(()=>c.end())",
         ]
       interval: 20s
       timeout: 10s
@@ -114,23 +138,44 @@ services:
     networks:
       - backend
 
-  caddy:
-    image: caddy:2.10-alpine
-    restart: unless-stopped
+  backup:
+    image: postgres:17-bookworm
+    profiles: ["tools"]
     environment:
-      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN in .env.production}
-      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env.production}
-    depends_on:
-      web:
-        condition: service_healthy
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      POSTGRES_DB: ${POSTGRES_DB:-hardware}
+      POSTGRES_USER: ${POSTGRES_USER:-hardware}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run .\hardware.ps1 setup first}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_RETENTION_WEEKS: ${BACKUP_RETENTION_WEEKS:-4}
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - "${HARDWARE_BACKUP_DIR:-./backups}:/backups"
+      - "${BACKUP_KEY_FILE:-./.hardware/backup.key}:/run/secrets/backup.key:ro"
+      - ./deploy/local-backup.sh:/opt/hardware/local-backup.sh:ro
+    entrypoint: ["/bin/sh", "/opt/hardware/local-backup.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+
+  restore:
+    image: postgres:17-bookworm
+    profiles: ["tools"]
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hardware}
+      POSTGRES_USER: ${POSTGRES_USER:-hardware}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run .\hardware.ps1 setup first}
+      RESTORE_FILE: ${RESTORE_FILE:-}
+      RESTORE_ACTION: ${RESTORE_ACTION:-stage}
+      RESTORE_OPERATION_ID: ${RESTORE_OPERATION_ID:-}
+    volumes:
+      - "${HARDWARE_BACKUP_DIR:-./backups}:/backups:ro"
+      - "${BACKUP_KEY_FILE:-./.hardware/backup.key}:/run/secrets/backup.key:ro"
+      - ./deploy/local-restore.sh:/opt/hardware/local-restore.sh:ro
+    entrypoint: ["/bin/sh", "/opt/hardware/local-restore.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - backend
 
@@ -140,5 +185,3 @@ networks:
 
 volumes:
   postgres-data:
-  caddy-data:
-  caddy-config:

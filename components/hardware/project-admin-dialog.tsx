@@ -228,20 +228,20 @@ export function ProjectAdminDialog({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Backdrop className="fixed inset-0 z-50 bg-[#111914]/55 backdrop-blur-[2px]" />
-        <Dialog.Viewport className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-4">
-          <Dialog.Popup className="relative w-full max-w-3xl rounded-2xl border border-[var(--line)] bg-[var(--surface)] shadow-2xl outline-none">
-            <div className="flex items-start justify-between gap-5 border-b border-[var(--line)] p-5 sm:p-6">
+        <Dialog.Backdrop className="fixed inset-0 z-50 bg-[var(--backdrop)] backdrop-blur-[2px]" />
+        <Dialog.Viewport className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-8">
+          <Dialog.Popup className="relative w-[900px] rounded-2xl border border-[var(--line)] bg-[var(--surface)] shadow-2xl outline-none">
+            <div className="flex items-start justify-between gap-5 border-b border-[var(--line)] p-6">
               <div>
                 <div className="flex items-center gap-2">
-                  <Badge variant="warning">Administrator</Badge>
+                  <Badge variant="accent">Owner tools</Badge>
                   <span className="text-[10px] text-[var(--muted)]">Version {project.version}</span>
                 </div>
                 <Dialog.Title className="mt-2 text-xl font-bold tracking-[-0.03em]">
                   Manage {project.name}
                 </Dialog.Title>
                 <Dialog.Description className="mt-1.5 max-w-2xl text-sm leading-6 text-[var(--muted-strong)]">
-                  Consequential catalog changes use optimistic versions and append a safe audit summary.
+                  Consequential library changes use optimistic versions and append a safe audit summary.
                 </Dialog.Description>
               </div>
               <Dialog.Close
@@ -252,11 +252,11 @@ export function ProjectAdminDialog({
               </Dialog.Close>
             </div>
 
-            <div className="grid min-h-[30rem] md:grid-cols-[12rem_minmax(0,1fr)]">
+            <div className="grid min-h-[30rem] grid-cols-[12rem_minmax(0,1fr)]">
               <div
-                className="flex gap-1 overflow-x-auto border-b border-[var(--line)] p-3 md:flex-col md:border-b-0 md:border-r"
+                className="flex flex-col gap-1 border-r border-[var(--line)] p-3"
                 role="tablist"
-                aria-label="Project administration"
+                aria-label="Project tools"
                 onKeyDown={moveAdminTab}
               >
                 {modes.map((item) => {
@@ -287,7 +287,7 @@ export function ProjectAdminDialog({
                 })}
               </div>
 
-              <div className="p-5 sm:p-6">
+              <div className="p-6">
                 {localError && (
                   <div className="mb-5 rounded-lg border border-[var(--danger-line)] bg-[var(--danger-soft)] p-3 text-xs font-medium text-[var(--danger)]" role="alert">
                     {localError}
@@ -297,7 +297,7 @@ export function ProjectAdminDialog({
                 {mode === "edit" && (
                   <form id="project-admin-edit" role="tabpanel" aria-labelledby="project-admin-tab-edit" onSubmit={submitEdit}>
                     <h3 className="text-sm font-bold">Editorial metadata</h3>
-                    <p className="mt-1 text-[11px] leading-5 text-[var(--muted)]">Correct the shared catalog record without changing source provenance.</p>
+                    <p className="mt-1 text-[11px] leading-5 text-[var(--muted)]">Correct the personal library record without changing source provenance.</p>
                     <div className="mt-5 space-y-4">
                       <label className="block text-xs font-semibold">Name<Input className="mt-2" value={name} onChange={(event) => setName(event.target.value)} maxLength={300} required autoFocus /></label>
                       <label className="block text-xs font-semibold">Description<textarea className="mt-2 min-h-28 w-full rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs leading-5 outline-none focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent-soft)]" value={description} onChange={(event) => setDescription(event.target.value)} maxLength={10000} /></label>
@@ -321,7 +321,7 @@ export function ProjectAdminDialog({
                   <form id="project-admin-split" role="tabpanel" aria-labelledby="project-admin-tab-split" onSubmit={submitSplit}>
                     <h3 className="text-sm font-bold">Create a project from selected provenance</h3>
                     <p className="mt-1 text-[11px] leading-5 text-[var(--muted)]">At least one sighting is required. Selected links move with the new project.</p>
-                    <div className="mt-5 grid gap-4 sm:grid-cols-2"><label className="block text-xs font-semibold">New project name<Input className="mt-2" value={splitName} onChange={(event) => setSplitName(event.target.value)} required maxLength={300} /></label><label className="block text-xs font-semibold">Primary URL<Input className="mt-2" type="url" value={splitPrimaryUrl} onChange={(event) => setSplitPrimaryUrl(event.target.value)} placeholder="Defaults to the first sighting" /></label></div>
+                    <div className="mt-5 grid grid-cols-2 gap-4"><label className="block text-xs font-semibold">New project name<Input className="mt-2" value={splitName} onChange={(event) => setSplitName(event.target.value)} required maxLength={300} /></label><label className="block text-xs font-semibold">Primary URL<Input className="mt-2" type="url" value={splitPrimaryUrl} onChange={(event) => setSplitPrimaryUrl(event.target.value)} placeholder="Defaults to the first sighting" /></label></div>
                     <label className="mt-4 block text-xs font-semibold">Description<textarea className="mt-2 min-h-20 w-full rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3 text-xs" value={splitDescription} onChange={(event) => setSplitDescription(event.target.value)} maxLength={10000} /></label>
                     <fieldset className="mt-5"><legend className="text-xs font-bold">Sightings to move</legend><div className="mt-2 max-h-36 space-y-2 overflow-y-auto rounded-lg border border-[var(--line)] p-2">{project.sightings.map((sighting) => <label key={sighting.id} className="flex cursor-pointer items-start gap-2 rounded-md p-2 text-[11px] hover:bg-[var(--surface-raised)]"><input type="checkbox" className="mt-0.5 size-4 accent-[var(--accent)]" checked={sightingIds.includes(sighting.id)} onChange={() => toggleSelection(sighting.id, sightingIds, setSightingIds)} /><span><span className="block font-semibold">{sighting.videoTitle} · {sighting.timestamp}</span><span className="block text-[10px] text-[var(--muted)]">{sighting.channel}</span></span></label>)}</div></fieldset>
                     {project.links.length > 0 && <fieldset className="mt-4"><legend className="text-xs font-bold">Links to move (optional)</legend><div className="mt-2 max-h-28 space-y-1 overflow-y-auto rounded-lg border border-[var(--line)] p-2">{project.links.map((link) => <label key={link.id} className="flex cursor-pointer items-start gap-2 rounded-md p-2 text-[11px] hover:bg-[var(--surface-raised)]"><input type="checkbox" className="mt-0.5 size-4 accent-[var(--accent)]" checked={linkIds.includes(link.id)} onChange={() => toggleSelection(link.id, linkIds, setLinkIds)} /><span className="min-w-0"><span className="block font-semibold">{link.label || link.kind}</span><span className="block truncate text-[10px] text-[var(--muted)]">{link.normalizedUrl}</span></span></label>)}</div></fieldset>}
@@ -333,8 +333,8 @@ export function ProjectAdminDialog({
                   <div id="project-admin-audit" role="tabpanel" aria-labelledby="project-admin-tab-audit">
                     <h3 className="text-sm font-bold">Audit and source refresh</h3>
                     <p className="mt-1 text-[11px] leading-5 text-[var(--muted)]">Metadata refreshes use durable, idempotent jobs. Safe failure summaries appear in Radar without exposing payloads or credentials.</p>
-                    <div className="mt-5 grid gap-3 sm:grid-cols-2"><button type="button" onClick={() => { onOpenChange(false); onOpenHistory(); }} className="rounded-xl border border-[var(--line)] p-4 text-left hover:bg-[var(--surface-raised)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]"><FileClock className="size-4 text-[var(--accent-strong)]" /><span className="mt-3 block text-xs font-bold">Open immutable history</span><span className="mt-1 block text-[10px] leading-4 text-[var(--muted)]">Review editorial, merge, split, and source events.</span></button><button type="button" onClick={refreshMetadata} disabled={busy} className="rounded-xl border border-[var(--line)] p-4 text-left hover:bg-[var(--surface-raised)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] disabled:opacity-60"><RefreshCw className={cn("size-4 text-[var(--accent-strong)]", busy && "animate-spin")} /><span className="mt-3 block text-xs font-bold">Refresh source metadata</span><span className="mt-1 block text-[10px] leading-4 text-[var(--muted)]">Queue website and verified repository refreshes.</span></button></div>
-                    {queuedJobs.length > 0 && <div className="mt-5 rounded-xl border border-[var(--success-line)] bg-[var(--success-soft)] p-4" role="status"><p className="text-xs font-bold text-[var(--success)]">Metadata jobs ready</p><ul className="mt-3 space-y-2">{queuedJobs.map((job) => <li key={job.id} className="rounded-lg border border-[var(--success-line)] bg-white/45 p-3"><div className="flex items-center justify-between gap-3"><span className="text-[10px] font-bold capitalize">{jobLabel(job.type)}</span><Badge variant="success">{job.state}</Badge></div><p className="mt-1 break-all font-mono text-[9px] text-[var(--muted)]">{job.id}</p></li>)}</ul></div>}
+                    <div className="mt-5 grid grid-cols-2 gap-3"><button type="button" onClick={() => { onOpenChange(false); onOpenHistory(); }} className="rounded-xl border border-[var(--line)] p-4 text-left hover:bg-[var(--surface-raised)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)]"><FileClock className="size-4 text-[var(--accent-strong)]" /><span className="mt-3 block text-xs font-bold">Open immutable history</span><span className="mt-1 block text-[10px] leading-4 text-[var(--muted)]">Review editorial, merge, split, and source events.</span></button><button type="button" onClick={refreshMetadata} disabled={busy} className="rounded-xl border border-[var(--line)] p-4 text-left hover:bg-[var(--surface-raised)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus)] disabled:opacity-60"><RefreshCw className={cn("size-4 text-[var(--accent-strong)]", busy && "animate-spin")} /><span className="mt-3 block text-xs font-bold">Refresh source metadata</span><span className="mt-1 block text-[10px] leading-4 text-[var(--muted)]">Queue website and verified repository refreshes.</span></button></div>
+                    {queuedJobs.length > 0 && <div className="mt-5 rounded-xl border border-[var(--success-line)] bg-[var(--success-soft)] p-4" role="status"><p className="text-xs font-bold text-[var(--success)]">Metadata jobs ready</p><ul className="mt-3 space-y-2">{queuedJobs.map((job) => <li key={job.id} className="rounded-lg border border-[var(--success-line)] bg-[var(--surface)] p-3"><div className="flex items-center justify-between gap-3"><span className="text-[10px] font-bold capitalize">{jobLabel(job.type)}</span><Badge variant="success">{job.state}</Badge></div><p className="mt-1 break-all font-mono text-[9px] text-[var(--muted)]">{job.id}</p></li>)}</ul></div>}
                   </div>
                 )}
               </div>

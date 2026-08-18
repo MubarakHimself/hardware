@@ -16,7 +16,7 @@ import type {
   DemoProject,
   DemoRepositoryCandidate,
 } from "../demo/types";
-import { DEMO_ACTOR_ID } from "./demo-identity";
+import { DEMO_ACTOR_ID } from "./local-identity";
 
 export type DemoStoredCollection = DemoCollection & {
   ownerId: string;
@@ -26,7 +26,7 @@ export type DemoCandidateDecision = "approved" | "rejected";
 
 export interface DemoQueuedImport {
   id: string;
-  kind: "youtube_video" | "website" | "github_repository";
+  kind: "youtube_video" | "youtube_channel" | "website" | "github_repository";
   url: string;
   state: "queued";
   correlationId: string;
@@ -109,7 +109,6 @@ export function createDemoCollection(input: {
   ownerId: string;
   name: string;
   description?: string;
-  visibility: "private" | "workspace";
 }): DemoStoredCollection {
   const state = getDemoState();
   const duplicate = state.collections.some(
@@ -127,7 +126,7 @@ export function createDemoCollection(input: {
     ownerId: input.ownerId,
     name: input.name,
     description: input.description ?? "",
-    visibility: input.visibility,
+    visibility: "private",
     projectIds: [],
     updatedAt: new Date().toISOString(),
     accent: "#6546c7",

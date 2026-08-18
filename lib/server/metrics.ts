@@ -147,7 +147,7 @@ export async function collectDatabaseMetrics(
 
 function metricsSecret(): string {
   const config = getServerConfig();
-  if (config.mode === "production") return config.healthcheckToken;
+  if (config.mode === "local") return config.healthcheckToken;
   const localSecret = process.env.HEALTHCHECK_TOKEN?.trim();
   if (!localSecret || localSecret.length < 32) {
     throw new ServerConfigurationError(
@@ -162,7 +162,7 @@ export async function protectedMetrics(request: Request): Promise<string> {
   requireMetricsAuthorization(request, secret);
   const config = getServerConfig();
   const database =
-    config.mode === "production"
+    config.mode === "local"
       ? await collectDatabaseMetrics()
       : emptyDatabaseMetricsSnapshot();
   return renderPrometheusMetrics(database);

@@ -22,6 +22,9 @@ const TIMESTAMP_HEADER_PATTERN =
 const TIMESTAMP_LIKE_PATTERN =
   /^\s*(?:[-*•·]\s*)?\[?\d{1,3}:\d{1,2}(?::\d{1,2})?\]?/u;
 
+const OUTSIDE_PROJECT_FOOTER_PATTERN =
+  /^\s*(?:newsletter|sponsor|affiliate|social|subscribe|subscription|channel|hashtags?)\b/iu;
+
 interface SourceLine {
   index: number;
   number: number;
@@ -206,20 +209,32 @@ function diagnostic(
   };
 }
 
-function firstContinuationLine(
+function blockLines(
   lines: SourceLine[],
   header: TimestampHeader,
   headerKinds: Map<number, "valid" | "invalid">,
-): SourceLine | undefined {
-  const immediate = lines[header.line.index + 1];
-  if (!immediate) return undefined;
-  if (headerKinds.has(immediate.index)) return undefined;
-  if (immediate.content.trim().length > 0) return immediate;
+): SourceLine[] {
+  const block: SourceLine[] = [];
+  for (let index = header.line.index; index < lines.length; index += 1) {
+    if (index !== header.line.index && headerKinds.has(index)) break;
+    block.push(lines[index]);
+  }
+  while (block.length > 1 && block.at(-1)?.content.trim().length === 0) {
+    block.pop();
+  }
+  return block;
+}
 
-  const afterOneBlank = lines[header.line.index + 2];
-  if (!afterOneBlank || afterOneBlank.content.trim().length === 0) return undefined;
-  if (headerKinds.has(afterOneBlank.index)) return undefined;
-  return afterOneBlank;
+function projectLines(block: SourceLine[], header: TimestampHeader): SourceLine[] {
+  let foundUrl = extractUrlTokens(header.tail).length > 0;
+  for (let index = 1; index < block.length; index += 1) {
+    const line = block[index];
+    if (foundUrl && OUTSIDE_PROJECT_FOOTER_PATTERN.test(line.content)) {
+      return block.slice(0, index);
+    }
+    if (extractUrlTokens(line.content).length > 0) foundUrl = true;
+  }
+  return block;
 }
 
 function ignoredReason(
@@ -314,9 +329,18 @@ export function parseYouTubeDescription(
       );
     }
 
+    const sourceBlock = blockLines(lines, header, headerKinds);
+    // Preserve the complete timestamp block for provenance, while keeping
+    // explicitly labelled promotional/footer URLs out of project identity.
+    const scopedProjectLines = projectLines(sourceBlock, header);
+    const segmentEndLine = sourceBlock.at(-1) ?? header.line;
     const headerTokens = locateTokens(header.line, header.tail, header.tailStart);
-    let locatedTokens = headerTokens;
-    let segmentEndLine = header.line;
+    const locatedTokens = [
+      ...headerTokens,
+      ...scopedProjectLines.slice(1).flatMap((line) =>
+        locateTokens(line, line.content, 0),
+      ),
+    ];
     let labelSource = removeTokens(
       header.tail,
       headerTokens.map((token) => ({
@@ -326,20 +350,22 @@ export function parseYouTubeDescription(
       })),
     );
 
-    if (locatedTokens.length === 0) {
-      const continuation = firstContinuationLine(lines, header, headerKinds);
-      if (continuation) {
-        const continuationTokens = locateTokens(
-          continuation,
+    if (cleanProjectName(labelSource).length === 0) {
+      for (const continuation of scopedProjectLines.slice(1)) {
+        const continuationTokens = locatedTokens
+          .filter((token) => token.line.index === continuation.index)
+          .map((token) => ({
+            rawUrl: token.rawUrl,
+            start: token.start,
+            end: token.end,
+          }));
+        const candidate = removeTokens(
           continuation.content,
-          0,
+          continuationTokens,
         );
-        if (continuationTokens.length > 0) {
-          locatedTokens = continuationTokens;
-          segmentEndLine = continuation;
-          if (cleanProjectName(labelSource).length === 0) {
-            labelSource = removeTokens(continuation.content, continuationTokens);
-          }
+        if (cleanProjectName(candidate).length > 0) {
+          labelSource = candidate;
+          break;
         }
       }
     }

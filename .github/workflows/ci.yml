@@ -16,13 +16,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
+      APP_MODE: local
       DATABASE_URL: postgresql://hardware:hardware@127.0.0.1:5432/hardware_test
       DATABASE_SSL: "false"
-      NEXT_PUBLIC_APP_URL: https://hardware.example.test
-      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
-      CLERK_SECRET_KEY: sk_test_ci_only_not_a_real_credential
-      CLERK_WEBHOOK_SIGNING_SECRET: whsec_ci_only_not_a_real_credential
-      ADMIN_CLERK_USER_IDS: user_ci_admin
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
+      LOCAL_OWNER_ID: 00000000-0000-4000-8000-000000000001
+      LOCAL_OWNER_NAME: CI local owner
+      POSTGRES_DB: hardware_test
+      POSTGRES_USER: hardware
+      POSTGRES_PASSWORD: hardware
       HEALTHCHECK_TOKEN: ci-healthcheck-token-at-least-thirty-two-characters
       YOUTUBE_API_KEY: ci-youtube-key-not-a-real-credential
       RELEASE_SHA: ${{ github.sha }}
@@ -52,6 +54,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
+      - run: npm run desktop:check
       - run: npm test
       - run: npm run test:bdd
       - run: npm run db:check
@@ -60,26 +63,23 @@ jobs:
       - run: npm run db:api-smoke
       - run: npm run db:mutation-smoke
       - run: npm run build
+      - run: npm run desktop:compile
+      - run: npm run desktop:runtime
+      - run: npm run desktop:icons
+      - run: npm run desktop:scan
       - run: npm run security:audit
-      - run: shellcheck deploy/*.sh
-      - run: >-
-          docker run --rm
-          --entrypoint /bin/promtool
-          -v "$PWD:/mnt:ro"
-          prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
-          check rules /mnt/deploy/prometheus-alerts.yml
-      - run: docker compose --env-file .env.example config --quiet
+      - run: shellcheck deploy/*.sh scripts/desktop/*.sh
+      - run: docker compose --profile tools --env-file .env.example config --quiet
       - run: >-
           docker build
-          --build-arg NEXT_PUBLIC_APP_URL=https://hardware.example.test
-          --build-arg NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_Y2xlcmsuZXhhbXBsZS5jb20k
+          --build-arg NEXT_PUBLIC_APP_URL=http://127.0.0.1:3000
           --tag hardware:ci .
 
   browser:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      DEMO_MODE: "true"
+      APP_MODE: demo
       DEMO_USER_ROLE: admin
       NEXT_PUBLIC_APP_URL: http://127.0.0.1:3000
 
@@ -94,3 +94,25 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+
+  windows-launcher:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Parse local PowerShell launcher
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\hardware.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | Format-List
+            exit 1
+          }

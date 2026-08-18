@@ -78,6 +78,7 @@ export type UiJobState =
 export interface UiJob {
   id: string;
   type:
+    | "channel_resolve"
     | "channel_backfill"
     | "channel_poll"
     | "video_ingest"
@@ -106,15 +107,12 @@ export interface UiJob {
 
 export interface UiCollection {
   id: string;
-  ownerId: string;
   name: string;
   description: string;
-  visibility: "private" | "workspace";
   version: number;
   projectIds: string[];
   projectCount: number;
   updatedAt: string;
-  canEdit: boolean;
   accent: string;
 }
 
@@ -364,15 +362,12 @@ export function normalizeCollection(value: unknown): UiCollection {
   const projectIds = textArray(source.projectIds ?? source.project_ids);
   return {
     id,
-    ownerId: text(source.ownerId ?? source.owner_id),
     name: text(source.name, "Untitled collection"),
     description: text(source.description),
-    visibility: text(source.visibility) === "workspace" ? "workspace" : "private",
     version: Math.max(1, number(source.version, 1)),
     projectIds,
     projectCount: number(source.projectCount ?? source.project_count, projectIds.length),
     updatedAt: relativeDate(source.updatedAt ?? source.updated_at, "Recently"),
-    canEdit: boolean(source.canEdit ?? source.can_edit),
     accent: accentFor(id),
   };
 }
@@ -433,7 +428,7 @@ export function normalizeChannel(value: unknown): UiChannel {
     progress,
     progressLabel: text(source.progressLabel ?? source.progress_label) || (total > 0 ? `${completed} of ${total} videos` : undefined),
     lastSync: relativeDate(source.lastSync ?? source.lastSyncedAt ?? source.last_synced_at ?? source.lastSuccessfulSyncAt ?? source.last_successful_sync_at, "Not synced yet"),
-    nextSync: relativeDate(source.nextSync ?? source.nextSyncAt ?? source.next_sync_at ?? source.next_sync, "within 6 hours"),
+    nextSync: relativeDate(source.nextSync ?? source.nextSyncAt ?? source.next_sync_at ?? source.next_sync, "Not scheduled"),
     retryableJobId: text(source.retryableJobId ?? source.retryableFailedJobId ?? source.retryable_failed_job_id ?? source.retryable_job_id) || null,
   };
 }
@@ -442,6 +437,7 @@ export function normalizeJob(value: unknown): UiJob {
   const source = record(value);
   const rawType = text(source.type);
   const type: UiJob["type"] = [
+    "channel_resolve",
     "channel_backfill",
     "channel_poll",
     "video_ingest",

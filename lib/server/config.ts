@@ -1,6 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import type { UserRole } from "../domain";
+import { DEFAULT_LOCAL_OWNER_ID } from "./local-identity";
 
 export class ServerConfigurationError extends Error {
   constructor(message = "The server is not configured for this runtime.") {
@@ -9,27 +10,26 @@ export class ServerConfigurationError extends Error {
   }
 }
 
+type RuntimeBase = {
+  appOrigin: string;
+  releaseSha: string;
+};
+
 export type ServerConfig =
-  | {
+  | (RuntimeBase & {
       mode: "demo";
       demoRole: UserRole;
-      releaseSha: string;
-    }
-  | {
-      mode: "production";
+    })
+  | (RuntimeBase & {
+      mode: "local";
       databaseUrl: string;
-      clerkPublishableKey: string;
-      clerkSecretKey: string;
-      clerkWebhookSigningSecret: string;
-      adminClerkUserIds: readonly string[];
-      appOrigin: string;
+      localOwnerId: string;
+      localOwnerName: string;
       healthcheckToken: string;
-      youtubeApiKey: string;
+      desktopSessionToken?: string;
+      youtubeApiKey?: string;
       githubToken?: string;
-      releaseSha: string;
-    };
-
-const booleanFlag = z.enum(["true", "false"]).default("false");
+    });
 
 const placeholderHealthcheckTokens = new Set([
   "replacewithalongrandomvalue",
@@ -51,14 +51,37 @@ const healthcheckToken = z
     );
   });
 
+function loopbackOrigin(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  const hostname = url.hostname.toLowerCase();
+  const loopback =
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "[::1]" ||
+    hostname === "::1";
+  if (!loopback || url.protocol !== "http:" || url.username || url.password) {
+    return null;
+  }
+  return url.origin;
+}
+
 export function getServerConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): ServerConfig {
   const common = z
     .object({
       NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-      DEMO_MODE: booleanFlag,
+      APP_MODE: z.enum(["local", "demo"]).default("local"),
       DEMO_USER_ROLE: z.enum(["member", "admin"]).default("admin"),
+      NEXT_PUBLIC_APP_URL: z
+        .string()
+        .trim()
+        .default("http://127.0.0.1:3000"),
       RELEASE_SHA: z.string().trim().min(1).max(160).default("development"),
     })
     .safeParse(environment);
@@ -67,52 +90,52 @@ export function getServerConfig(
     throw new ServerConfigurationError();
   }
 
-  const demoMode = common.data.DEMO_MODE === "true";
-  if (demoMode) {
+  const appOrigin = loopbackOrigin(common.data.NEXT_PUBLIC_APP_URL);
+  if (!appOrigin) {
+    throw new ServerConfigurationError(
+      "NEXT_PUBLIC_APP_URL must be an HTTP loopback URL.",
+    );
+  }
+
+  if (common.data.APP_MODE === "demo") {
     if (common.data.NODE_ENV === "production") {
       throw new ServerConfigurationError(
-        "DEMO_MODE must never be enabled in production.",
+        "APP_MODE=demo must never be enabled in production.",
       );
     }
     return {
       mode: "demo",
       demoRole: common.data.DEMO_USER_ROLE,
+      appOrigin,
       releaseSha: common.data.RELEASE_SHA,
     };
   }
 
-  const appUrl = z.string().url().superRefine((value, context) => {
-    const protocol = new URL(value).protocol;
-    if (protocol !== "http:" && protocol !== "https:") {
-      context.addIssue({
-        code: "custom",
-        message: "NEXT_PUBLIC_APP_URL must use HTTP(S).",
-      });
-    }
-    if (common.data.NODE_ENV === "production" && protocol !== "https:") {
-      context.addIssue({
-        code: "custom",
-        message: "NEXT_PUBLIC_APP_URL must use HTTPS in production.",
-      });
-    }
-  });
-
   const configured = z
     .object({
       DATABASE_URL: z.string().url().startsWith("postgresql://"),
-      NEXT_PUBLIC_APP_URL: appUrl,
-      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: z.string().trim().min(20),
-      CLERK_SECRET_KEY: z.string().trim().min(20),
-      CLERK_WEBHOOK_SIGNING_SECRET: z.string().trim().startsWith("whsec_").min(20),
-      ADMIN_CLERK_USER_IDS: z
-        .string()
-        .trim()
-        .transform((value) =>
-          [...new Set(value.split(",").map((id) => id.trim()).filter(Boolean))],
-        )
-        .pipe(z.array(z.string().startsWith("user_").max(128)).min(1)),
+      // Personal Local has one durable identity. Accepting an arbitrary UUID
+      // here could create a second owner and make migrated personal data appear
+      // to disappear, so an explicit value must also be the stable owner ID.
+      LOCAL_OWNER_ID: z
+        .literal(DEFAULT_LOCAL_OWNER_ID)
+        .default(DEFAULT_LOCAL_OWNER_ID),
+      LOCAL_OWNER_NAME: z.string().trim().min(1).max(160).default("Local owner"),
       HEALTHCHECK_TOKEN: healthcheckToken,
-      YOUTUBE_API_KEY: z.string().trim().min(20).max(512),
+      DESKTOP_SESSION_TOKEN: z.preprocess(
+        (value) =>
+          typeof value === "string" && value.trim() === ""
+            ? undefined
+            : value,
+        healthcheckToken.optional(),
+      ),
+      YOUTUBE_API_KEY: z.preprocess(
+        (value) =>
+          typeof value === "string" && value.trim() === ""
+            ? undefined
+            : value,
+        z.string().trim().min(20).max(512).optional(),
+      ),
       GITHUB_TOKEN: z.preprocess(
         (value) =>
           typeof value === "string" && value.trim() === ""
@@ -121,21 +144,24 @@ export function getServerConfig(
         z.string().trim().min(1).max(512).optional(),
       ),
     })
-    .safeParse(environment);
+    .safeParse({
+      ...environment,
+      HEALTHCHECK_TOKEN:
+        environment.HEALTHCHECK_TOKEN ?? environment.DESKTOP_SESSION_TOKEN,
+    });
 
   if (!configured.success) {
     throw new ServerConfigurationError();
   }
 
   return {
-    mode: "production",
+    mode: "local",
     databaseUrl: configured.data.DATABASE_URL,
-    appOrigin: new URL(configured.data.NEXT_PUBLIC_APP_URL).origin,
-    clerkPublishableKey: configured.data.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
-    clerkSecretKey: configured.data.CLERK_SECRET_KEY,
-    clerkWebhookSigningSecret: configured.data.CLERK_WEBHOOK_SIGNING_SECRET,
-    adminClerkUserIds: configured.data.ADMIN_CLERK_USER_IDS,
+    localOwnerId: configured.data.LOCAL_OWNER_ID,
+    localOwnerName: configured.data.LOCAL_OWNER_NAME,
+    appOrigin,
     healthcheckToken: configured.data.HEALTHCHECK_TOKEN,
+    desktopSessionToken: configured.data.DESKTOP_SESSION_TOKEN,
     youtubeApiKey: configured.data.YOUTUBE_API_KEY,
     githubToken: configured.data.GITHUB_TOKEN,
     releaseSha: common.data.RELEASE_SHA,

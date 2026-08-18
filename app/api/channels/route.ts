@@ -20,6 +20,6 @@ export async function POST(request: Request) {
     enforceRateLimit({ actorId: actor.userId, bucket: "channels:create", maximum: 10, windowMs: 60_000 });
     const input = channelCreateSchema.parse(await readJsonBody(request));
     const result = await addChannel({ actor, input, correlationId });
-    return successResponse(result, { status: result.created ? 202 : 200, correlationId });
+    return successResponse(result, { status: result.monitoringStarted ? 202 : 200, correlationId });
   });
 }

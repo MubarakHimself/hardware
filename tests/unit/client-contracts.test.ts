@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { normalizeCandidate, normalizeChannel, normalizeJob, normalizeProject } from "../../lib/client/contracts";
+import {
+  normalizeCandidate,
+  normalizeChannel,
+  normalizeCollection,
+  normalizeJob,
+  normalizeProject,
+} from "../../lib/client/contracts";
 import { contrastTextColor } from "../../lib/utils";
 
 describe("client DTO normalization", () => {
@@ -102,6 +108,32 @@ describe("client DTO normalization", () => {
       canRetry: true,
     }));
     expect(job).not.toHaveProperty("checkpoint");
+    expect(normalizeJob({ type: "channel_resolve" }).type).toBe("channel_resolve");
+  });
+
+  it("keeps legacy collection ownership and visibility fields internal", () => {
+    const collection = normalizeCollection({
+      id: "collection",
+      ownerId: "legacy-owner",
+      name: "Personal research",
+      description: "Private local notes.",
+      visibility: "workspace",
+      canEdit: false,
+      version: 2,
+      projectIds: ["project"],
+      projectCount: 1,
+    });
+
+    expect(collection).toEqual(expect.objectContaining({
+      id: "collection",
+      name: "Personal research",
+      version: 2,
+      projectIds: ["project"],
+      projectCount: 1,
+    }));
+    expect(collection).not.toHaveProperty("ownerId");
+    expect(collection).not.toHaveProperty("visibility");
+    expect(collection).not.toHaveProperty("canEdit");
   });
 
   it("chooses a readable avatar foreground for light and dark accents", () => {

@@ -10,7 +10,9 @@ import {
 } from "../validation";
 import { getServerConfig, ServerConfigurationError } from "./config";
 import { ApiError } from "./errors";
+import { isAllowedLocalOrigin } from "./local-request";
 import { serverLogger } from "./logger";
+import { assertRuntimeAcceptingMutations } from "./runtime-control";
 
 const MAX_JSON_BYTES = 64 * 1024;
 const UUID =
@@ -66,6 +68,7 @@ export async function withApiHandler(
   const instance = new URL(request.url).pathname;
 
   try {
+    assertRuntimeAcceptingMutations(request);
     return await handler({ correlationId, instance });
   } catch (error) {
     if (error instanceof ZodError) {
@@ -227,15 +230,7 @@ export async function readJsonBody(request: Request): Promise<unknown> {
 
 export function requireSameOrigin(request: Request): void {
   const config = getServerConfig();
-  if (config.mode === "demo") return;
-  const origin = request.headers.get("origin");
-  let normalizedOrigin: string | null = null;
-  try {
-    normalizedOrigin = origin ? new URL(origin).origin : null;
-  } catch {
-    normalizedOrigin = null;
-  }
-  if (!normalizedOrigin || normalizedOrigin !== config.appOrigin) {
+  if (!isAllowedLocalOrigin(request.headers.get("origin"), config.appOrigin)) {
     throw new AuthorizationError("forbidden");
   }
 }

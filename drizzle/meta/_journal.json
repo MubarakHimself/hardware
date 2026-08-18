@@ -15,6 +15,48 @@
       "when": 1784719220273,
       "tag": "20260722112020_cuddly_steve_rogers",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784754000000,
+      "tag": "20260722210000_local_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784757600000,
+      "tag": "20260722220000_personal_ingestion",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784761200000,
+      "tag": "20260722153615_personal_local_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784764800000,
+      "tag": "20260722171447_ingestion_correctness",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784768400000,
+      "tag": "20260722173135_source_review_safety",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784772000000,
+      "tag": "20260722174004_channel_batch_import",
+      "breakpoints": true
     }
   ]
 }

@@ -159,6 +159,35 @@ export function isYouTubeUrl(value: string): boolean {
   }
 }
 
+const UNSUPPORTED_SOCIAL_VIDEO_HOSTS = new Set([
+  "dai.ly",
+  "dailymotion.com",
+  "facebook.com",
+  "fb.watch",
+  "instagram.com",
+  "snapchat.com",
+  "tiktok.com",
+  "twitch.tv",
+  "twitter.com",
+  "vimeo.com",
+  "x.com",
+]);
+
+/**
+ * Social-video pages are not generic project websites. Keep them out of the
+ * website metadata lane until a provider-specific ingestion path exists.
+ */
+export function isUnsupportedSocialVideoUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase().replace(/^www\./, "");
+    return [...UNSUPPORTED_SOCIAL_VIDEO_HOSTS].some(
+      (host) => hostname === host || hostname.endsWith(`.${host}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function getYouTubeVideoId(value: string): string | null {
   let url: URL;
   try {
@@ -197,6 +226,50 @@ export function getYouTubeVideoId(value: string): string | null {
   }
 
   return candidate && YOUTUBE_VIDEO_ID.test(candidate) ? candidate : null;
+}
+
+export interface YouTubeChannelImportIdentity {
+  kind: "id" | "handle";
+  value: string;
+  canonicalUrl: string;
+}
+
+/** Parse only channel references that the official Data API client can resolve. */
+export function getYouTubeChannelImportIdentity(
+  value: string,
+): YouTubeChannelImportIdentity | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username !== "" ||
+    url.password !== ""
+  ) {
+    return null;
+  }
+  const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+  if (hostname !== "youtube.com" && hostname !== "m.youtube.com") return null;
+  const [root, identity] = url.pathname.split("/").filter(Boolean);
+  if (root === "channel" && identity && /^UC[A-Za-z0-9_-]{22}$/u.test(identity)) {
+    return {
+      kind: "id",
+      value: identity,
+      canonicalUrl: `https://www.youtube.com/channel/${identity}`,
+    };
+  }
+  if (root?.startsWith("@") && /^@[A-Za-z0-9._-]{3,30}$/u.test(root)) {
+    const handle = root.slice(1).toLowerCase();
+    return {
+      kind: "handle",
+      value: handle,
+      canonicalUrl: `https://www.youtube.com/@${handle}`,
+    };
+  }
+  return null;
 }
 
 export interface GitHubRepositoryIdentity {

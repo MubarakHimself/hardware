@@ -6,68 +6,112 @@ import {
   getServerConfig,
   ServerConfigurationError,
 } from "../../lib/server/config";
+import { DEFAULT_LOCAL_OWNER_ID } from "../../lib/server/local-identity";
 
-const productionEnvironment = {
+const localEnvironment = {
   NODE_ENV: "production",
-  DEMO_MODE: "false",
+  APP_MODE: "local",
   DATABASE_URL: "postgresql://hardware:password@postgres:5432/hardware",
-  NEXT_PUBLIC_APP_URL: "https://hardware.example.test",
-  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_abcdefghijklmnopqrstuvwxyz",
-  CLERK_SECRET_KEY: "sk_test_abcdefghijklmnopqrstuvwxyz",
-  CLERK_WEBHOOK_SIGNING_SECRET: "whsec_abcdefghijklmnopqrstuvwxyz",
-  ADMIN_CLERK_USER_IDS: "user_admin1234567890",
+  NEXT_PUBLIC_APP_URL: "http://127.0.0.1:3000",
   HEALTHCHECK_TOKEN: "unit-test-health-token-7f3c9a2b5d8e1f4a",
   YOUTUBE_API_KEY: "youtube-key-abcdefghijklmnopqrstuvwxyz",
 } satisfies NodeJS.ProcessEnv;
 
 describe("server configuration", () => {
-  it("accepts only the canonical HTTPS origin in production", () => {
-    const config = getServerConfig(productionEnvironment);
+  it("defaults persistent identity to one stable local administrator", () => {
+    const config = getServerConfig(localEnvironment);
 
-    expect(config.mode).toBe("production");
-    if (config.mode === "production") {
-      expect(config.appOrigin).toBe("https://hardware.example.test");
-    }
-
-    expect(() =>
-      getServerConfig({
-        ...productionEnvironment,
-        NEXT_PUBLIC_APP_URL: "http://hardware.example.test",
-      }),
-    ).toThrow(ServerConfigurationError);
-    expect(() =>
-      getServerConfig({
-        ...productionEnvironment,
-        NEXT_PUBLIC_APP_URL: "ftp://hardware.example.test",
-      }),
-    ).toThrow(ServerConfigurationError);
+    expect(config).toMatchObject({
+      mode: "local",
+      appOrigin: "http://127.0.0.1:3000",
+      localOwnerId: DEFAULT_LOCAL_OWNER_ID,
+      localOwnerName: "Local owner",
+    });
+    expect(config).not.toHaveProperty("clerkSecretKey");
   });
 
-  it("allows HTTP for local development and treats an empty GitHub token as absent", () => {
+  it("allows a local library to start before YouTube is configured", () => {
     const config = getServerConfig({
-      ...productionEnvironment,
-      NODE_ENV: "development",
-      NEXT_PUBLIC_APP_URL: "http://127.0.0.1:3000/path",
-      GITHUB_TOKEN: "",
+      ...localEnvironment,
+      YOUTUBE_API_KEY: undefined,
+    });
+
+    expect(config).toMatchObject({ mode: "local" });
+    expect(config).toHaveProperty("youtubeApiKey", undefined);
+  });
+
+  it("accepts a per-launch desktop token as the protected probe token", () => {
+    const token = "desktop-session-token-7f3c9a2b5d8e1f4a";
+    const config = getServerConfig({
+      ...localEnvironment,
+      HEALTHCHECK_TOKEN: undefined,
+      DESKTOP_SESSION_TOKEN: token,
     });
 
     expect(config).toMatchObject({
-      mode: "production",
-      appOrigin: "http://127.0.0.1:3000",
-      githubToken: undefined,
+      mode: "local",
+      desktopSessionToken: token,
+      healthcheckToken: token,
     });
   });
 
-  it("rejects placeholder and repeated-character probe secrets", () => {
-    for (const healthcheckToken of [
-      "replace_with_a_long_random_value",
-      "a".repeat(32),
+  it("rejects every alternate local owner ID", () => {
+    expect(() =>
+      getServerConfig({
+        ...localEnvironment,
+        LOCAL_OWNER_ID: "00000000-0000-4000-8000-000000000002",
+      }),
+    ).toThrow(ServerConfigurationError);
+
+    expect(
+      getServerConfig({
+        ...localEnvironment,
+        LOCAL_OWNER_ID: DEFAULT_LOCAL_OWNER_ID,
+      }),
+    ).toMatchObject({ localOwnerId: DEFAULT_LOCAL_OWNER_ID });
+  });
+
+  it("accepts loopback HTTP only and normalizes the configured origin", () => {
+    expect(
+      getServerConfig({
+        ...localEnvironment,
+        NEXT_PUBLIC_APP_URL: "http://localhost:3000/path",
+      }),
+    ).toMatchObject({ appOrigin: "http://localhost:3000" });
+
+    for (const appUrl of [
+      "https://hardware.example.test",
+      "http://192.168.1.50:3000",
+      "https://127.0.0.1:3000",
+      "ftp://127.0.0.1:3000",
     ]) {
       expect(() =>
-        getServerConfig({
-          ...productionEnvironment,
-          HEALTHCHECK_TOKEN: healthcheckToken,
-        }),
+        getServerConfig({ ...localEnvironment, NEXT_PUBLIC_APP_URL: appUrl }),
+      ).toThrow(ServerConfigurationError);
+    }
+  });
+
+  it("keeps demo fixtures explicit and rejects them in production", () => {
+    expect(
+      getServerConfig({
+        APP_MODE: "demo",
+        NODE_ENV: "test",
+        DEMO_USER_ROLE: "member",
+      }),
+    ).toMatchObject({
+      mode: "demo",
+      demoRole: "member",
+      appOrigin: "http://127.0.0.1:3000",
+    });
+    expect(() =>
+      getServerConfig({ APP_MODE: "demo", NODE_ENV: "production" }),
+    ).toThrow(ServerConfigurationError);
+  });
+
+  it("rejects placeholder and repeated-character probe secrets", () => {
+    for (const token of ["replace_with_a_long_random_value", "a".repeat(32)]) {
+      expect(() =>
+        getServerConfig({ ...localEnvironment, HEALTHCHECK_TOKEN: token }),
       ).toThrow(ServerConfigurationError);
     }
   });

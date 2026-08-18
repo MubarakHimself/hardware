@@ -13,7 +13,8 @@ type Scope = {
   queueName?: string;
 };
 
-type SchedulerPool = Pick<Pool, "connect">;
+type EnqueuePool = Pick<Pool, "connect">;
+type SchedulerPool = Pick<Pool, "connect" | "query">;
 
 const safeSourceUrlSchema = z
   .url()
@@ -25,12 +26,26 @@ const safeSourceUrlSchema = z
   }, "Source URLs in durable jobs must be public HTTP(S) URLs without credentials or secret-like query parameters.");
 
 const durablePayloadSchemas: Record<TaskName, z.ZodType<Record<string, unknown>>> = {
-  channel_backfill: z.object({ channelSourceId: z.uuid() }).strict(),
+  channel_resolve: z.object({
+    url: safeSourceUrlSchema,
+    requestedByUserId: z.uuid().optional(),
+  }).strict(),
+  channel_backfill: z.object({
+    channelSourceId: z.uuid(),
+    historyMode: z.enum(["latest_10", "latest_25", "latest_50", "since", "all"]).optional(),
+    historySince: z.iso.datetime({ offset: true }).optional(),
+    subscriptionJobId: z.uuid().optional(),
+  }).strict().refine(
+    (value) => value.historyMode !== "since" || Boolean(value.historySince),
+    "A since date is required for since-mode backfills.",
+  ),
   channel_poll: z.object({ channelSourceId: z.uuid() }).strict(),
   video_ingest: z.object({
     videoSourceId: z.uuid().optional(),
     url: safeSourceUrlSchema.optional(),
     parentJobId: z.uuid().optional(),
+    useStoredMetadata: z.boolean().optional(),
+    sourceUnavailable: z.boolean().optional(),
   }).strict()
     .refine((value) => Boolean(value.videoSourceId || value.url), "A video source ID or public URL is required."),
   youtube_revalidate: z.object({ videoSourceId: z.uuid() }).strict(),
@@ -67,11 +82,17 @@ function timeBucket(date: Date, bucketHours: number): string {
   return new Date(Math.floor(date.getTime() / bucketMs) * bucketMs).toISOString();
 }
 
+export function hasYouTubeCredential(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  return Boolean(environment.YOUTUBE_API_KEY?.trim());
+}
+
 export async function enqueueTrackedJob(
   task: TaskName,
   scope: Scope,
   scheduleBucket: string,
-  options: { pool?: SchedulerPool } = {},
+  options: { pool?: EnqueuePool } = {},
 ): Promise<boolean> {
   const durablePayload = durablePayloadForTask(task, scope.payload);
   const idempotencyKey = `${task}:${scope.scopeType}:${scope.scopeId}:${scheduleBucket}`;
@@ -79,6 +100,33 @@ export async function enqueueTrackedJob(
 
   try {
     await client.query("begin");
+    if (
+      scope.scopeType === "channel" &&
+      (task === "channel_backfill" || task === "channel_poll")
+    ) {
+      // The advisory lock closes the race between the overdue sweep, startup
+      // catch-up, and a manual sync. Graphile's queue then preserves the same
+      // one-channel-at-a-time guarantee after commit.
+      await client.query(
+        "select pg_advisory_xact_lock(hashtextextended($1::text, 0))",
+        [`hardware:channel:${scope.scopeId}`],
+      );
+      const active = await client.query<{ id: string }>(
+        `select id
+           from ingestion_jobs
+          where scope_type = 'channel'
+            and scope_id = $1
+            and type in ('channel_backfill', 'channel_poll')
+            and state in ('queued', 'running')
+          order by created_at
+          limit 1`,
+        [scope.scopeId],
+      );
+      if (active.rows[0]) {
+        await client.query("rollback");
+        return false;
+      }
+    }
     const inserted = await client.query<{
       id: string;
       correlation_id: string;
@@ -151,15 +199,28 @@ export async function enqueueTrackedJob(
   }
 }
 
-export const scheduleChannelPolls: Task = async () => {
-  const result = await getPool().query<{ id: string }>(
+export async function scheduleOverdueChannelPolls(
+  pool: SchedulerPool = getPool(),
+  options: { youtubeConfigured?: boolean } = {},
+): Promise<number> {
+  const youtubeConfigured =
+    options.youtubeConfigured ?? hasYouTubeCredential();
+  if (!youtubeConfigured) {
+    logger.info({
+      event: "channel_polls_skipped",
+      reason: "youtube_provider_not_configured",
+    });
+    return 0;
+  }
+  const result = await pool.query<{ id: string }>(
     `
       select id
       from channel_sources
       where enabled = true
-        and state = 'active'
-        and (next_sync_at is null or next_sync_at <= now())
-      order by coalesce(next_sync_at, created_at)
+        and state <> 'paused'
+        and sync_frequency <> 'manual'
+        and next_sync_at <= now()
+      order by next_sync_at
     `,
   );
 
@@ -176,6 +237,7 @@ export const scheduleChannelPolls: Task = async () => {
           queueName: `channel:${channel.id}`,
         },
         bucket,
+        { pool },
       )
     ) {
       enqueued += 1;
@@ -183,16 +245,47 @@ export const scheduleChannelPolls: Task = async () => {
   }
 
   logger.info({ event: "channel_polls_scheduled", enqueued });
+  return enqueued;
+}
+
+export const scheduleChannelPolls: Task = async () => {
+  await scheduleOverdueChannelPolls();
 };
 
 export const scheduleYouTubeRevalidation: Task = async () => {
+  if (!hasYouTubeCredential()) {
+    logger.info({
+      event: "youtube_revalidation_skipped",
+      reason: "youtube_provider_not_configured",
+    });
+    return;
+  }
   const result = await getPool().query<{ id: string }>(
     `
+      with due as (
+        select id, availability,
+               case
+                 when availability = 'unavailable' then unavailable_recheck_at
+                 else coalesce(youtube_data_expires_at, created_at)
+               end as due_at
+          from video_sources
+         where (availability = 'available' and (
+                  youtube_data_expires_at is null
+                  or youtube_data_expires_at <= now()
+                ))
+            or (availability = 'unavailable' and unavailable_recheck_at <= now())
+      ), ranked as (
+        select id, availability, due_at,
+               row_number() over (
+                 partition by availability order by due_at, id
+               ) as lane_position
+          from due
+      )
       select id
-      from video_sources
-      where youtube_data_expires_at is null
-         or youtube_data_expires_at <= now()
-      order by coalesce(youtube_data_expires_at, created_at)
+        from ranked
+       order by lane_position,
+                case when availability = 'unavailable' then 0 else 1 end,
+                due_at, id
       limit 500
     `,
   );

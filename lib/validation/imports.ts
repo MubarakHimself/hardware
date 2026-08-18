@@ -2,8 +2,10 @@ import { z } from "zod";
 import type { ImportCommand } from "../domain";
 import {
   getGitHubRepositoryIdentity,
+  getYouTubeChannelImportIdentity,
   getYouTubeVideoId,
   isSafeImportUrlSyntax,
+  isUnsupportedSocialVideoUrl,
   isYouTubeUrl,
 } from "./public-url";
 
@@ -27,6 +29,15 @@ export const importRequestSchema: z.ZodType<ImportCommand> = z
       .strict(),
     z
       .object({
+        kind: z.literal("youtube_channel"),
+        url: importUrl.refine(
+          (url) => getYouTubeChannelImportIdentity(url) !== null,
+          "Enter a supported YouTube /channel/ID or @handle URL.",
+        ),
+      })
+      .strict(),
+    z
+      .object({
         kind: z.literal("github_repository"),
         url: importUrl.refine(
           (url) => getGitHubRepositoryIdentity(url) !== null,
@@ -45,6 +56,10 @@ export const importRequestSchema: z.ZodType<ImportCommand> = z
           .refine(
             (url) => getGitHubRepositoryIdentity(url) === null,
             "Use the GitHub repository import type for this URL.",
+          )
+          .refine(
+            (url) => !isUnsupportedSocialVideoUrl(url),
+            "Instagram and other social-video imports are not supported yet.",
           ),
       })
       .strict(),
